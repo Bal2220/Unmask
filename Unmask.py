@@ -86,22 +86,23 @@ def dashboard(usuario):
     main = tk.Frame(dash, bg="#eef2f6", width=ANCHO-250, height=ALTO)
     main.place(x=250, y=0)
 
-    # Título
-    tk.Label(
+    titulo_seccion = tk.Label(
         main,
         text="Dashboard",
         fg="#052749",
         bg="#eef2f6",
         font=("Segoe UI", 26, "bold")
-    ).place(x=25, y=20)
+    )
+    titulo_seccion.place(x=25, y=20)
 
-    tk.Label(
+    subtitulo_seccion = tk.Label(
         main,
         text="Resumen general de extorsión y sicariato en el Perú - SIDPOL 2025",
         fg="#4a5d73",
         bg="#eef2f6",
         font=("Segoe UI", 11)
-    ).place(x=25, y=60)
+    )
+    subtitulo_seccion.place(x=25, y=60)
 
     contenido = tk.Frame(main, bg="#eef2f6", width=ANCHO-250, height=ALTO-90)
     contenido.place(x=0, y=90)
@@ -114,6 +115,30 @@ def dashboard(usuario):
     boton_activo = None
 
     # ------------------- CAMBIO SECCIÓN -------------------
+    encabezados = {
+        "Dashboard": (
+            "Dashboard",
+            "Resumen general de extorsión y sicariato en el Perú - SIDPOL 2025"
+        ),
+        "Grafo Territorial": (
+            "Explorar Grafo Territorial",
+            "Visualización del grafo de distritos sin aplicar algoritmos — Solo exploración visual"
+        ),
+        "Algoritmos": (
+            "Algoritmos avanzados",
+            "Ejecuta MST, Floyd-Warshall, BFS/DFS desde main.py en consola"
+        ),
+        "Resultados": (
+            "Resultados estratégicos",
+            "Genera el informe ejecutivo detallado desde la opción correspondiente en consola"
+        ),
+    }
+
+    def actualizar_encabezado(nombre):
+        titulo, subtitulo = encabezados.get(nombre, (nombre, ""))
+        titulo_seccion.config(text=titulo)
+        subtitulo_seccion.config(text=subtitulo)
+
     def cambiar_seccion(nombre, boton_widget):
         nonlocal boton_activo
 
@@ -137,6 +162,8 @@ def dashboard(usuario):
             )
 
         boton_activo = boton_widget
+
+        actualizar_encabezado(nombre)
 
         if nombre == "Dashboard":
             cargar_dashboard()
@@ -350,26 +377,10 @@ def dashboard(usuario):
         vista = tk.Frame(contenido, bg="#eef2f6", width=ANCHO-250, height=ALTO-90)
         vista.pack(fill="both", expand=True)
 
-        tk.Label(
-            vista,
-            text="Explorar Grafo Territorial",
-            fg="#0A1B2E",
-            bg="#eef2f6",
-            font=("Segoe UI", 24, "bold")
-        ).place(x=25, y=10)
-
-        tk.Label(
-            vista,
-            text="Visualización del grafo de distritos sin aplicar algoritmos — Solo exploración visual",
-            fg="#46607D",
-            bg="#eef2f6",
-            font=("Segoe UI", 11)
-        ).place(x=25, y=48)
-
         opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
 
         filtros = tk.Frame(vista, bg="#081629", width=900, height=120)
-        filtros.place(x=25, y=90)
+        filtros.place(x=25, y=20)
         filtros.grid_propagate(False)
         for col in range(5):
             filtros.columnconfigure(col, weight=1)
@@ -444,7 +455,7 @@ def dashboard(usuario):
         btn_generar.grid(row=0, column=4, rowspan=2, padx=12, pady=15, sticky="nsew")
 
         grafo_card = tk.Frame(vista, bg="white", width=670, height=380)
-        grafo_card.place(x=25, y=230)
+        grafo_card.place(x=25, y=170)
         grafo_card.pack_propagate(False)
 
         titulo_grafo = tk.Label(
@@ -482,7 +493,7 @@ def dashboard(usuario):
         leyenda_frame.place(x=25, y=330)
 
         derecha = tk.Frame(vista, bg="#eef2f6", width=230, height=360)
-        derecha.place(x=720, y=230)
+        derecha.place(x=720, y=170)
 
         info_card = tk.Frame(derecha, bg="#112744", width=230, height=110)
         info_card.pack(fill="x")
@@ -629,7 +640,7 @@ def dashboard(usuario):
                     color_valor,
                     abrir_archivo=False
                 )
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 estado_grafo.config(text=str(exc), fg="#DC2626")
                 imagen_lbl.config(image="", text="")
                 imagen_lbl.image = None

@@ -7,7 +7,9 @@ import graphviz
 import os
 from IPython.display import display, Image
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
+from graphviz.backend.execute import ExecutableNotFound
+import matplotlib.pyplot as plt
 
 # Configuración de filtros disponibles para reutilizar en la GUI.
 TIPO_DELITO_OPCIONES: List[Dict[str, str]] = [
@@ -21,6 +23,19 @@ COLOR_POR_OPCIONES: List[Dict[str, str]] = [
     {"label": "Volumen de casos", "value": "cases"},
     {"label": "Conectividad", "value": "connectivity"},
 ]
+
+DEPARTAMENTO_SINONIMOS = {
+    "LIMA METROPOLITANA": "LIMA",
+    "LIMA METROPOLITANO": "LIMA",
+    "PROVINCIA DE LIMA": "LIMA",
+    "LA LIBERTAD": "LA LIBERTAD",
+}
+
+def normalizar_departamento_nombre(nombre: str) -> str:
+    if not nombre:
+        return ""
+    key = nombre.upper().strip()
+    return DEPARTAMENTO_SINONIMOS.get(key, key)
 
 
 def pedir_parametros_usuario(df):
@@ -62,42 +77,52 @@ def obtener_opciones_filtros(df: pd.DataFrame) -> Dict[str, List[str]]:
 
 def filtrar_dataframe(df, department, crime_type, year):
     # Intentar convertir el año a int si es posible
+    year_str = str(year).strip()
     try:
-        year = int(year)
+        year_int = int(year_str)
     except ValueError:
-        pass 
+        year_int = None
 
     # Normalización para filtros
-    dep_upper = department.upper().strip()
+    dep_upper = normalizar_departamento_nombre(department)
     crime_type_upper = crime_type.upper().strip()
-    
-    # 1. Filtro por Año
-    df_year = df[df["ANIO"] == year]
+
+    anio_series = df["ANIO"].astype(str).str.strip()
+    if year_int is not None:
+        mask_year = (anio_series == str(year_int)) | (df["ANIO"] == year_int)
+    else:
+        mask_year = anio_series == year_str
+
+    df_year = df[mask_year]
 
     # 2. Filtro por Departamento
     df_dep = df_year[df_year["DPTO_HECHO_NEW"].str.upper().str.strip() == dep_upper]
+
+    tipo_norm = df_dep["TIPO"].astype(str).str.upper().str.strip()
+    subtipo_norm = df_dep["SUB_TIPO"].astype(str).str.upper().str.strip()
 
     # 3. Filtro por Tipo/Subtipo de Delito (EL PUNTO CLAVE)
     if crime_type_upper == "TODO":
         return df_dep
 
     if crime_type_upper in {"AMBOS", "EXTORSION Y SICARIATO"}:
-        return df_dep[df_dep["TIPO"].isin(["EXTORSION", "HOMICIDIO"])]
+        mask = (
+            tipo_norm.isin(["EXTORSION", "HOMICIDIO"]) |
+            subtipo_norm.isin(["EXTORSION", "SICARIATO"])
+        )
+        return df_dep[mask]
 
     if crime_type_upper in {"SOLO_EXTORSION", "SOLO EXTORSION"}:
-        return df_dep[df_dep["TIPO"].str.upper().str.strip() == "EXTORSION"]
+        mask = (tipo_norm == "EXTORSION") | (subtipo_norm == "EXTORSION")
+        return df_dep[mask]
 
     if crime_type_upper in {"SOLO_SICARIATO", "SOLO SICARIATO"}:
-        return df_dep[
-            (df_dep["TIPO"].str.upper().str.strip() == "HOMICIDIO") |
-            (df_dep["SUB_TIPO"].str.upper().str.strip() == "SICARIATO")
-        ]
+        mask = (tipo_norm == "HOMICIDIO") | (subtipo_norm == "SICARIATO")
+        return df_dep[mask]
 
     # Filtro estándar: busca el tipo de crimen ingresado tanto en TIPO como en SUB_TIPO
-    return df_dep[
-        (df_dep["TIPO"].str.upper().str.strip() == crime_type_upper) | 
-        (df_dep["SUB_TIPO"].str.upper().str.strip() == crime_type_upper)
-    ]
+    mask = (tipo_norm == crime_type_upper) | (subtipo_norm == crime_type_upper)
+    return df_dep[mask]
 
 def obtener_conteos(df_filtered):
     # ESTO YA ES UN CONTEO FILTRADO POR EL TIPO DE DELITO SELECCIONADO
@@ -117,18 +142,55 @@ def obtener_conteos(df_filtered):
 
     return df_crime_counts, df_crime_subtypes
 
+def obtener_posiciones_geograficas(gdf_dep) -> Dict[str, Tuple[float, float]]:
+    """Devuelve posiciones normalizadas (longitud, latitud) por distrito."""
+    posiciones = {}
+    for _, row in gdf_dep.iterrows():
+        geom = row.get("geometry")
+        if geom is None or geom.is_empty:
+            continue
+        punto = geom.representative_point()
+        posiciones[row["NOMBDIST"]] = (float(punto.x), float(punto.y))
+    return posiciones
+
 def construir_grafo(gdf_dep):
     G = nx.Graph()
 
-    for _, row in gdf_dep.iterrows():
-        G.add_node(row["NOMBDIST"])
+    gdf_dep = gdf_dep.copy().reset_index(drop=True)
 
-    for i, row_i in gdf_dep.iterrows():
-        for j, row_j in gdf_dep.iterrows():
-            if i < j:
-                if row_i.geometry.touches(row_j.geometry) or row_i.geometry.intersects(row_j.geometry):
+    nombres = gdf_dep["NOMBDIST"].tolist()
+    geoms = gdf_dep["geometry"].tolist()
+    bboxes = [geom.bounds for geom in geoms]
 
-                    G.add_edge(row_i["NOMBDIST"], row_j["NOMBDIST"])
+    for nombre in nombres:
+        G.add_node(nombre)
+
+    total = len(nombres)
+    for i in range(total):
+        geom_i = geoms[i]
+        bbox_i = bboxes[i]
+        for j in range(i + 1, total):
+            geom_j = geoms[j]
+            bbox_j = bboxes[j]
+
+            if (
+                bbox_i[2] < bbox_j[0]
+                or bbox_j[2] < bbox_i[0]
+                or bbox_i[3] < bbox_j[1]
+                or bbox_j[3] < bbox_i[1]
+            ):
+                continue
+
+            try:
+                touching = geom_i.touches(geom_j)
+                intersecting = geom_i.intersects(geom_j)
+            except Exception:
+                # Corrección de topologías problemáticas en geometrías complejas (ej. Lima)
+                touching = geom_i.buffer(0).touches(geom_j.buffer(0))
+                intersecting = geom_i.buffer(0).intersects(geom_j.buffer(0))
+
+            if touching or intersecting:
+                G.add_edge(nombres[i], nombres[j])
 
     print(f"Grafo creado con {G.number_of_nodes()} nodos y {G.number_of_edges()} aristas.")
     return G
@@ -262,29 +324,21 @@ def imprimir_estadisticas_grafo(G):
     print(f"Total de casos: {sum(nx.get_node_attributes(G, 'Crime_Count').values())}")
     print(f"Peso total aristas: {sum(nx.get_edge_attributes(G, 'weight').values())}")
 
-def graficar_grafo_graphviz(G, df_centrality, department_input, color_mode="cases", abrir_archivo=False):
-
-    output_dir = "grafos_generados"
-    os.makedirs(output_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"grafo_{department_input}_{timestamp}"
-    output_path = os.path.join(output_dir, base_name)
-
-    # Configuración de Graphviz
-    dot = graphviz.Graph(
-        comment=f'Grafo Territorial de {department_input}', 
-        engine='neato', 
-        format='png',
-        graph_attr={
-            'size': '12,10',
-            'overlap': 'false',
-            'splines': 'true',
-            'ranksep': '1.5',
-            'nodesep': '0.8',
-            'fontname': 'Sans-Serif'
-        }
-    )
+def graficar_grafo_matplotlib(
+    G: nx.Graph,
+    df_centrality: pd.DataFrame,
+    department_input: str,
+    color_mode: str,
+    output_dir: str,
+    base_name: str,
+    node_positions: Optional[Dict[str, Tuple[float, float]]] = None,
+):
+    """Renderiza el grafo usando NetworkX + Matplotlib como fallback local."""
+    plt.ioff()
+    # 620x240 target aspect ratio (~2.58) so the thumbnail fills the GUI slot
+    fig, ax = plt.subplots(figsize=(15.5, 6.0), dpi=160)
+    fig.patch.set_facecolor("#FFFFFF")
+    ax.set_facecolor("#FFFFFF")
 
     crime_category_colors = {
         'Low Crime': '#00B8DB',
@@ -302,69 +356,303 @@ def graficar_grafo_graphviz(G, df_centrality, department_input, color_mode="case
     category_key = "Crime_Category" if color_mode != "connectivity" else "Connectivity_Category"
     default_category = 'Low Crime' if color_mode != "connectivity" else 'Low Connectivity'
 
-    # --- NODOS ---
+    df_lookup = (
+        df_centrality.assign(_norm=lambda d: d['District'].str.upper().str.strip())
+        .drop_duplicates('_norm', keep='first')
+        .set_index('_norm')
+    )
+
+    if node_positions:
+        xs = [pos[0] for pos in node_positions.values()]
+        ys = [pos[1] for pos in node_positions.values()]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        def normalizar(pos):
+            escala_x = (pos[0] - min_x) / (max_x - min_x + 1e-9)
+            escala_y = (pos[1] - min_y) / (max_y - min_y + 1e-9)
+            return (0.05 + escala_x * 0.9, 0.05 + escala_y * 0.9)
+
+        pos = {}
+        for node in G.nodes:
+            if node in node_positions:
+                pos[node] = normalizar(node_positions[node])
+            else:
+                pos[node] = None
+        faltantes = [n for n, p in pos.items() if p is None]
+        if faltantes:
+            spring_pos = nx.kamada_kawai_layout(G)
+            for node in faltantes:
+                pos[node] = spring_pos[node]
+    else:
+        pos = nx.kamada_kawai_layout(G)
+
+    node_colors = []
+    node_sizes = []
+    labels = {}
+    cases_por_nodo = {}
+    max_cases = df_centrality['Crime_Count'].max() or 1
+
+    for node in G.nodes:
+        node_norm = node.upper().strip()
+        row = df_lookup.loc[node_norm] if node_norm in df_lookup.index else None
+        crime_count = int(row['Crime_Count']) if row is not None else 0
+        node_category = row[category_key] if row is not None else default_category
+
+        node_colors.append(palette.get(node_category, '#94A3B8'))
+        node_sizes.append(900 + (crime_count / max_cases) * 600)
+        labels[node] = node
+        cases_por_nodo[node] = crime_count
+
+    edges = nx.get_edge_attributes(G, 'weight')
+    edge_weights = list(edges.values()) or [1]
+    min_w, max_w = min(edge_weights), max(edge_weights)
+
+    def scale_edge_weight(w):
+        if max_w == min_w:
+            return 1.0
+        return 0.5 + (w - min_w) * (3.5) / (max_w - min_w)
+
+    edge_widths = []
+    for u, v in G.edges():
+        weight = edges.get((u, v))
+        if weight is None:
+            weight = edges.get((v, u), 1)
+        edge_widths.append(scale_edge_weight(weight))
+
+    nx.draw_networkx_edges(
+        G,
+        pos,
+        ax=ax,
+        edge_color="#64748B",
+        width=edge_widths,
+        alpha=0.7,
+    )
+    nx.draw_networkx_nodes(
+        G,
+        pos,
+        ax=ax,
+        node_color=node_colors,
+        node_size=node_sizes,
+        linewidths=1.5,
+        edgecolors="#0F172A",
+    )
+    nx.draw_networkx_labels(
+        G,
+        pos,
+        labels=labels,
+        font_size=7,
+        font_color="#F8FAFC",
+        font_weight="bold",
+        ax=ax,
+    )
+
+    # Etiquetas adicionales con “(n casos)” debajo del nodo para emular Graphviz
+    for node, (x, y) in pos.items():
+        casos = cases_por_nodo.get(node, 0)
+        ax.text(
+            x,
+            y - 0.025,
+            f"({casos} casos)",
+            fontsize=8,
+            color="#0F172A",
+            ha="center",
+            va="top",
+        )
+
+    edge_label_pos = {edge: edges.get(edge, edges.get((edge[1], edge[0]), 0)) for edge in G.edges()}
+    nx.draw_networkx_edge_labels(
+        G,
+        pos,
+        edge_labels={edge: str(weight) for edge, weight in edge_label_pos.items()},
+        font_size=6,
+        font_color="#475569",
+        bbox=dict(facecolor="#FFFFFF", alpha=0.7, edgecolor="none", pad=0.2),
+        ax=ax,
+    )
+
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_position([0.02, 0.08, 0.96, 0.84])
+    ax.axis("off")
+
+    output_path = os.path.join(output_dir, f"{base_name}_matplotlib.png")
+    plt.savefig(output_path, facecolor=fig.get_facecolor(), pad_inches=0.1)
+    plt.close(fig)
+    print(f"[i] Grafo renderizado con Matplotlib en: {output_path}")
+    return output_path
+
+def _render_graphviz_estilo_original(
+    G: nx.Graph,
+    df_centrality: pd.DataFrame,
+    department_input: str,
+    color_mode: str,
+    output_dir: str,
+    base_name: str,
+):
+    """Replica el render clásico solicitado usando Graphviz (neato)."""
+    dot = graphviz.Graph(
+        comment=f"Grafo Territorial de {department_input}",
+        engine="neato",
+        format="png",
+        graph_attr={
+            "size": "12,4.65!",
+            "ratio": "fill",
+            "overlap": "false",
+            "splines": "true",
+            "ranksep": "1.5",
+            "nodesep": "0.8",
+            "fontname": "Sans-Serif",
+        },
+    )
+
+    crime_category_colors = {
+        "Low Crime": "#00B8DB",
+        "Medium Crime": "#FF6900",
+        "High Crime": "#E7000B",
+    }
+    connectivity_colors = {
+        "Low Connectivity": "#94A3B8",
+        "Medium Connectivity": "#FACC15",
+        "High Connectivity": "#38BDF8",
+    }
+
+    palette = (
+        crime_category_colors
+        if color_mode != "connectivity"
+        else connectivity_colors
+    )
+    category_key = (
+        "Crime_Category" if color_mode != "connectivity" else "Connectivity_Category"
+    )
+    default_category = (
+        "Low Crime" if color_mode != "connectivity" else "Low Connectivity"
+    )
+
     for node_name in G.nodes():
-        # Búsqueda robusta
-        row_match = df_centrality[df_centrality['District'].str.upper().str.strip() == node_name.upper().strip()]
-        
+        row_match = df_centrality[
+            df_centrality["District"].str.upper().str.strip()
+            == node_name.upper().strip()
+        ]
+
         if row_match.empty:
             crime_count = 0
             node_category = default_category
         else:
             node_data = row_match.iloc[0]
-            crime_count = node_data.get('Crime_Count', 0)
+            crime_count = node_data.get("Crime_Count", 0)
             node_category = node_data.get(category_key, default_category)
 
-        node_color = palette.get(node_category, '#CCCCCC') 
+        node_color = palette.get(node_category, "#CCCCCC")
 
         main_font_size = 10
         crime_count_font_size = 8
-        if node_category in {'High Crime', 'High Connectivity'}:
+        if node_category in {"High Crime", "High Connectivity"}:
             main_font_size = 12
             crime_count_font_size = 10
 
         dot.node(
             node_name,
             label=node_name,
-            xlabel=f'({crime_count} casos)',
+            xlabel=f"({crime_count} casos)",
             color=str(node_color),
-            style='filled',
+            style="filled",
             fillcolor=str(node_color),
-            fontname='Sans-Serif',
+            fontname="Sans-Serif",
             fontsize=str(main_font_size),
             labelfontsize=str(crime_count_font_size),
-            labelfontname='Sans-Serif',
-            fixedsize='false'
+            labelfontname="Sans-Serif",
+            fixedsize="false",
         )
 
-    # --- ARISTAS ---
-    weights = [data.get('weight', 0) for _, _, data in G.edges(data=True)]
+    weights = [data.get("weight", 0) for _, _, data in G.edges(data=True)]
     min_edge_weight = min(weights, default=0)
     max_edge_weight = max(weights, default=0)
 
     def scale_edge_weight_to_penwidth(weight):
         if max_edge_weight == min_edge_weight or max_edge_weight == 0:
             return 1.0
-        # Escala de 0.5 a 4.5
-        scaled = 0.5 + (weight - min_edge_weight) * (4.5 - 0.5) / (max_edge_weight - min_edge_weight)
+        scaled = 0.5 + (weight - min_edge_weight) * (4.5 - 0.5) / (
+            max_edge_weight - min_edge_weight
+        )
         return max(0.5, scaled)
 
     for u, v, data in G.edges(data=True):
-        weight = data.get('weight', 0)
+        weight = data.get("weight", 0)
         penwidth = scale_edge_weight_to_penwidth(weight)
         dot.edge(
-            u, v,
+            u,
+            v,
             label=str(weight),
             penwidth=str(penwidth),
-            color='#8393A9',
-            fontsize='8',
-            fontname='Sans-Serif',
-            fontcolor='#8393A9'
+            color="#8393A9",
+            fontsize="8",
+            fontname="Sans-Serif",
+            fontcolor="#8393A9",
         )
 
-    # --- GENERAR PNG ---
+    output_path = os.path.join(output_dir, base_name)
     dot.render(output_path, view=False)
-    png_file = f"{output_path}.png"
+    png_path = f"{output_path}.png"
+    if not os.path.exists(png_path):
+        gv_candidate = f"{output_path}.gv.png"
+        if os.path.exists(gv_candidate):
+            png_path = gv_candidate
+    return png_path
+
+def graficar_grafo_graphviz(
+    G,
+    df_centrality,
+    department_input,
+    color_mode="cases",
+    abrir_archivo=False,
+    node_positions=None,
+):
+
+    output_dir = "grafos_generados"
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"grafo_{department_input}_{timestamp}"
+
+    try:
+        png_file = _render_graphviz_estilo_original(
+            G,
+            df_centrality,
+            department_input,
+            color_mode,
+            output_dir,
+            base_name,
+        )
+        used_graphviz = True
+    except ExecutableNotFound:
+        print(
+            "[!] Graphviz no está disponible. Se usará el render interno (aspecto distinto al del ejemplo)."
+        )
+        used_graphviz = False
+        png_file = graficar_grafo_matplotlib(
+            G,
+            df_centrality,
+            department_input,
+            color_mode,
+            output_dir,
+            base_name,
+            node_positions,
+        )
+    except Exception as exc:
+        print(
+            f"[!] Falló Graphviz ({exc}). Se usará el render interno (aspecto distinto al del ejemplo)."
+        )
+        used_graphviz = False
+        png_file = graficar_grafo_matplotlib(
+            G,
+            df_centrality,
+            department_input,
+            color_mode,
+            output_dir,
+            base_name,
+            node_positions,
+        )
 
     print(f"[✓] Grafo guardado en: {png_file}")
 
@@ -438,10 +726,16 @@ def generar_grafo_territorial(df, gdf, department, crime_type, year, color_mode=
 
     df_counts, df_subtypes = obtener_conteos(df_filtered)
 
-    dep_upper = department.upper().strip()
-    gdf_dep = gdf[gdf["NOMBDEP"].str.upper().str.strip() == dep_upper]
+    dep_upper = normalizar_departamento_nombre(department)
+    gdf_dep = gdf[gdf["NOMBDEP"].str.upper().str.strip() == dep_upper].copy()
     if gdf_dep.empty:
         raise ValueError(f"No hay geometrías para el departamento '{department}'.")
+
+    # Corrección ligera asegura geometrías válidas para cálculos de adyacencia/centroides
+    gdf_dep = gdf_dep.reset_index(drop=True)
+    gdf_dep["geometry"] = gdf_dep["geometry"].buffer(0)
+
+    node_positions = obtener_posiciones_geograficas(gdf_dep)
 
     G = construir_grafo(gdf_dep)
     if G.number_of_nodes() == 0:
@@ -451,7 +745,14 @@ def generar_grafo_territorial(df, gdf, department, crime_type, year, color_mode=
     df_centrality = calcular_centralidad(G, df_counts)
     df_centrality, thresholds = categorizar_distritos(df_centrality)
 
-    image_path = graficar_grafo_graphviz(G, df_centrality, department, color_mode=color_mode, abrir_archivo=abrir_archivo)
+    image_path = graficar_grafo_graphviz(
+        G,
+        df_centrality,
+        department,
+        color_mode=color_mode,
+        abrir_archivo=abrir_archivo,
+        node_positions=node_positions,
+    )
     legend = construir_leyenda(color_mode, thresholds)
     stats = resumir_estadisticas(df_filtered, G)
 
