@@ -406,17 +406,23 @@ def dashboard(usuario):
         )
 
         departamentos = opciones.get("departamentos", [])
+        departamentos_display = [d.upper() for d in departamentos]
+        depto_map = {display: original for display, original in zip(departamentos_display, departamentos)}
+
         tipo_opciones = opciones.get("tipo_delito", [])
-        color_opciones = opciones.get("color_por", [])
+        tipo_labels = [opt["label"].upper() for opt in tipo_opciones]
         anios = opciones.get("anios", [])
 
-        tipo_map = {opt["label"]: opt["value"] for opt in tipo_opciones}
-        color_map = {opt["label"]: opt["value"] for opt in color_opciones}
+        tipo_map = {opt["label"].upper(): opt["value"] for opt in tipo_opciones}
 
-        depto_var = tk.StringVar(value=departamentos[0] if departamentos else "")
-        tipo_var = tk.StringVar(value=tipo_opciones[0]["label"] if tipo_opciones else "")
+        color_opciones = opciones.get("color_por", [])
+        color_labels = [opt["label"].upper() for opt in color_opciones]
+        color_map = {opt["label"].upper(): opt["value"] for opt in color_opciones}
+
+        depto_var = tk.StringVar(value=departamentos_display[0] if departamentos_display else "")
+        tipo_var = tk.StringVar(value=tipo_labels[0] if tipo_labels else "")
         anio_var = tk.StringVar(value=anios[-1] if anios else "")
-        color_var = tk.StringVar(value=color_opciones[0]["label"] if color_opciones else "")
+        color_var = tk.StringVar(value=color_labels[0] if color_labels else "")
 
         def crear_selector(texto, columna, variable, valores):
             tk.Label(
@@ -439,10 +445,10 @@ def dashboard(usuario):
                 combo.configure(state="disabled")
             return combo
 
-        crear_selector("Departamento", 0, depto_var, departamentos)
-        crear_selector("Tipo de delito", 1, tipo_var, [opt["label"] for opt in tipo_opciones])
+        crear_selector("Departamento", 0, depto_var, departamentos_display)
+        crear_selector("Tipo de delito", 1, tipo_var, tipo_labels)
         crear_selector("Año", 2, anio_var, anios)
-        crear_selector("Colorear por", 3, color_var, [opt["label"] for opt in color_opciones])
+        crear_selector("Colorear por", 3, color_var, color_labels)
 
         btn_generar = tk.Button(
             filtros,
@@ -626,6 +632,7 @@ def dashboard(usuario):
             tipo_valor = tipo_map.get(tipo_var.get(), "TODO")
             color_valor = color_map.get(color_var.get(), "cases")
             anio_valor = anio_var.get() or (anios[-1] if anios else "")
+            depto_real = depto_map.get(depto_var.get(), depto_var.get())
 
             if not anio_valor:
                 estado_grafo.config(text="Selecciona un año válido.", fg="#DC2626")
@@ -635,7 +642,7 @@ def dashboard(usuario):
                 resultado = B_explorar_grafo.generar_grafo_territorial(
                     DF_SIDPOL,
                     GDF_GEO,
-                    depto_var.get(),
+                    depto_real,
                     tipo_valor,
                     anio_valor,
                     color_valor,
@@ -703,11 +710,15 @@ def dashboard(usuario):
 
         opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
         departamentos = opciones.get("departamentos", [])
-        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
-        tipo_map = {opt["label"]: opt["value"] for opt in tipo_opciones}
+        departamentos_display = [d.upper() for d in departamentos]
+        depto_map = {display: original for display, original in zip(departamentos_display, departamentos)}
 
-        depto_var = tk.StringVar(value=departamentos[0] if departamentos else "")
-        tipo_var = tk.StringVar(value=tipo_opciones[0]["label"] if tipo_opciones else "Todos")
+        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
+        tipo_labels = [opt["label"].upper() for opt in tipo_opciones]
+        tipo_map = {opt["label"].upper(): opt["value"] for opt in tipo_opciones}
+
+        depto_var = tk.StringVar(value=departamentos_display[0] if departamentos_display else "")
+        tipo_var = tk.StringVar(value=tipo_labels[0] if tipo_labels else "TODOS")
         estado_var = tk.StringVar(value="Selecciona filtros y ejecuta un algoritmo.")
 
         filtros = tk.Frame(vista, bg="#081629", height=120)
@@ -756,8 +767,8 @@ def dashboard(usuario):
                 combo.configure(state="disabled")
             return combo
 
-        depto_combo = crear_selector("Departamento", 0, depto_var, departamentos)
-        crear_selector("Tipo de delito", 1, tipo_var, [opt["label"] for opt in tipo_opciones])
+        depto_combo = crear_selector("Departamento", 0, depto_var, departamentos_display)
+        crear_selector("Tipo de delito", 1, tipo_var, tipo_labels)
 
         tabs_frame = tk.Frame(vista, bg="#eef2f6")
         tabs_frame.pack(fill="x", padx=25, pady=(20, 10))
@@ -1083,7 +1094,8 @@ def dashboard(usuario):
         def obtener_distritos(dep):
             if not dep:
                 return []
-            dep_upper = dep.upper().strip()
+            dep_original = depto_map.get(dep, dep)
+            dep_upper = dep_original.upper().strip()
             mask = GDF_GEO["NOMBDEP"].str.upper().str.strip() == dep_upper
             distritos = sorted(GDF_GEO.loc[mask, "NOMBDIST"].dropna().unique())
             return distritos
@@ -1147,7 +1159,7 @@ def dashboard(usuario):
             )
 
         def ejecutar_algoritmo():
-            departamento = depto_var.get().strip()
+            departamento = depto_map.get(depto_var.get().strip(), depto_var.get().strip())
             if not departamento:
                 estado_var.set("Selecciona un departamento válido.")
                 return
@@ -1302,11 +1314,20 @@ def dashboard(usuario):
 
         opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
         departamentos = opciones.get("departamentos", [])
-        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
-        tipo_map = {opt["label"]: opt["value"] for opt in tipo_opciones}
+        departamentos_display = [d.upper() for d in departamentos]
+        depto_map = {display: original for display, original in zip(departamentos_display, departamentos)}
 
-        default_depto = ULTIMO_FILTRO_ALGORITMOS.get("departamento") or (departamentos[0] if departamentos else "")
-        default_tipo = ULTIMO_FILTRO_ALGORITMOS.get("tipo_label") or (tipo_opciones[0]["label"] if tipo_opciones else "Todos")
+        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
+        tipo_labels = [opt["label"].upper() for opt in tipo_opciones]
+        tipo_map = {opt["label"].upper(): opt["value"] for opt in tipo_opciones}
+
+        default_depto = ULTIMO_FILTRO_ALGORITMOS.get("departamento")
+        if default_depto:
+            default_depto = default_depto.upper()
+        else:
+            default_depto = departamentos_display[0] if departamentos_display else ""
+
+        default_tipo = ULTIMO_FILTRO_ALGORITMOS.get("tipo_label") or (tipo_labels[0] if tipo_labels else "TODOS")
 
         filtros = tk.Frame(vista, bg="#081629")
         filtros.pack(fill="x", padx=25, pady=(20, 10))
@@ -1331,7 +1352,7 @@ def dashboard(usuario):
             filtros.columnconfigure(col, weight=1)
 
         depto_var = tk.StringVar(value=default_depto)
-        tipo_var = tk.StringVar(value=default_tipo)
+        tipo_var = tk.StringVar(value=default_tipo.upper() if default_tipo else "")
         estado_var = tk.StringVar(value="Selecciona un departamento y genera el resumen.")
 
         def crear_selector(texto, columna, variable, valores):
@@ -1352,8 +1373,8 @@ def dashboard(usuario):
             combo.grid(row=3, column=columna, sticky="we", padx=(0, 20))
             return combo
 
-        crear_selector("Departamento", 0, depto_var, departamentos)
-        crear_selector("Tipo de delito", 1, tipo_var, [opt["label"] for opt in tipo_opciones])
+        crear_selector("Departamento", 0, depto_var, departamentos_display)
+        crear_selector("Tipo de delito", 1, tipo_var, tipo_labels)
 
         boton_frame = tk.Frame(filtros, bg="#081629")
         boton_frame.grid(row=3, column=2, sticky="e")
@@ -1706,8 +1727,9 @@ def dashboard(usuario):
 
         def generar_resumen(auto=False):
             nonlocal btn_generar
-            depto = depto_var.get().strip()
-            tipo_label = tipo_var.get()
+            depto_display = depto_var.get().strip()
+            depto = depto_map.get(depto_display, depto_display)
+            tipo_label = tipo_var.get().strip()
             crime_value = tipo_map.get(tipo_label, "TODO")
             if not depto:
                 estado_var.set("Selecciona un departamento válido.")
