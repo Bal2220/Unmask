@@ -1,0 +1,41 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dll
+*.egg-info/
+*.egg
+
+# Virtual environments
+P/
+venv/
+.env/
+.venv/
+ENV/
+
+# Logs and local databases
+*.log
+*.sqlite*
+*.db
+
+# Heavy local datasets (keep copies outside the repo)
+data/*.csv
+data/*.tsv
+data/*.json
+data/*.geojson
+data/*.xlsx
+
+# Generated graphs, reports, and images
+resultados_algoritmos/
+grafos_generados/
+*.gv
+*.gexf
+*.graphml
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
