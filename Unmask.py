@@ -33,6 +33,13 @@ COLOR_DORADO = "#FFD700"
 FUENTE_LABEL = ("Segoe UI", 17)
 
 
+ULTIMO_FILTRO_ALGORITMOS = {
+    "departamento": None,
+    "tipo_label": None,
+    "tipo_value": "TODO",
+}
+
+
 # FUNCIÓN PARA CENTRAR VENTANAS
 def centrar(ventana, ancho, alto):
     ventana.update_idletasks()
@@ -174,11 +181,7 @@ def dashboard(usuario):
         elif nombre == "Algoritmos":
             cargar_algoritmos()
         elif nombre == "Resultados":
-            messagebox.showinfo(
-                "Resultados",
-                "El informe estratégico detallado se imprime en consola desde main.py.\n\n"
-                "Aquí sólo mostramos el resumen visual."
-            )
+            cargar_resultados()
 
     # ------- MENÚ LATERAL -------
     botones = [
@@ -669,6 +672,7 @@ def dashboard(usuario):
         actualizar_stats(None)
 
     def cargar_algoritmos():
+        global ULTIMO_FILTRO_ALGORITMOS
         limpiar()
 
         contenedor_scroll = tk.Frame(contenido, bg="#eef2f6", width=ANCHO-250, height=ALTO-90)
@@ -1168,6 +1172,10 @@ def dashboard(usuario):
                 actualizar_detalles("Detalle", "Sin datos", "Detalle", "Sin datos")
                 return
 
+            ULTIMO_FILTRO_ALGORITMOS["departamento"] = departamento
+            ULTIMO_FILTRO_ALGORITMOS["tipo_label"] = tipo_var.get()
+            ULTIMO_FILTRO_ALGORITMOS["tipo_value"] = crime_value
+
             tab = selected_tab.get()
 
             try:
@@ -1279,6 +1287,473 @@ def dashboard(usuario):
 
         btn_ejecutar.config(command=ejecutar_algoritmo)
         cambiar_tab(selected_tab.get())
+
+    def cargar_resultados():
+        global ULTIMO_FILTRO_ALGORITMOS
+        limpiar()
+
+        COLOR_BG = "#050f1f"
+        COLOR_CARD = "#0f1f38"
+        COLOR_ACCENT = "#ef4444"
+
+        vista = tk.Frame(contenido, bg=COLOR_BG, width=ANCHO-250, height=ALTO-90)
+        vista.pack(fill="both", expand=True)
+        vista.pack_propagate(False)
+
+        opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
+        departamentos = opciones.get("departamentos", [])
+        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
+        tipo_map = {opt["label"]: opt["value"] for opt in tipo_opciones}
+
+        default_depto = ULTIMO_FILTRO_ALGORITMOS.get("departamento") or (departamentos[0] if departamentos else "")
+        default_tipo = ULTIMO_FILTRO_ALGORITMOS.get("tipo_label") or (tipo_opciones[0]["label"] if tipo_opciones else "Todos")
+
+        filtros = tk.Frame(vista, bg="#081629")
+        filtros.pack(fill="x", padx=25, pady=(20, 10))
+
+        tk.Label(
+            filtros,
+            text="Resultados del Análisis Territorial",
+            bg="#081629",
+            fg="white",
+            font=("Segoe UI", 16, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(10, 5))
+
+        tk.Label(
+            filtros,
+            text="Consolidado de hallazgos — BFS/DFS, Floyd-Warshall y Kruskal MST",
+            bg="#081629",
+            fg="#9fb8d9",
+            font=("Segoe UI", 10),
+        ).grid(row=1, column=0, columnspan=3, sticky="w")
+
+        for col in range(3):
+            filtros.columnconfigure(col, weight=1)
+
+        depto_var = tk.StringVar(value=default_depto)
+        tipo_var = tk.StringVar(value=default_tipo)
+        estado_var = tk.StringVar(value="Selecciona un departamento y genera el resumen.")
+
+        def crear_selector(texto, columna, variable, valores):
+            tk.Label(
+                filtros,
+                text=texto,
+                bg="#081629",
+                fg="#9fb8d9",
+                font=("Segoe UI", 10, "bold"),
+            ).grid(row=2, column=columna, sticky="w", pady=(15, 2))
+            combo = ttk.Combobox(
+                filtros,
+                textvariable=variable,
+                values=valores,
+                state="readonly",
+                width=25,
+            )
+            combo.grid(row=3, column=columna, sticky="we", padx=(0, 20))
+            return combo
+
+        crear_selector("Departamento", 0, depto_var, departamentos)
+        crear_selector("Tipo de delito", 1, tipo_var, [opt["label"] for opt in tipo_opciones])
+
+        boton_frame = tk.Frame(filtros, bg="#081629")
+        boton_frame.grid(row=3, column=2, sticky="e")
+
+        resumen_data = {"mst_image": None}
+        btn_generar = None
+
+        body_container = tk.Frame(vista, bg=COLOR_BG)
+        body_container.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        body_container.pack_propagate(False)
+
+        canvas = tk.Canvas(body_container, bg=COLOR_BG, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(body_container, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        body = tk.Frame(canvas, bg=COLOR_BG)
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _update_scroll(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _resize_body(event):
+            canvas.itemconfig(body_id, width=event.width)
+
+        body.bind("<Configure>", _update_scroll)
+        canvas.bind("<Configure>", _resize_body)
+
+        def limpiar_body():
+            for widget in body.winfo_children():
+                widget.destroy()
+
+        def formatear_valor(valor):
+            try:
+                if isinstance(valor, (int, float)):
+                    return f"{valor:,}".replace(",", ".")
+            except Exception:
+                pass
+            return str(valor)
+
+        def render_resumen(datos):
+            limpiar_body()
+            if not datos:
+                tk.Label(
+                    body,
+                    text="Aún no hay información generada para esta sección.",
+                    bg=COLOR_BG,
+                    fg="white",
+                    font=("Segoe UI", 12),
+                ).pack(pady=40)
+                return
+
+            cards_frame = tk.Frame(body, bg=COLOR_BG)
+            cards_frame.pack(fill="x", padx=10, pady=(10, 5))
+
+            for idx, card_data in enumerate(datos.get("cards", [])):
+                card = tk.Frame(cards_frame, bg=COLOR_CARD, width=190, height=90)
+                card.grid(row=0, column=idx, padx=8, pady=5, sticky="nsew")
+                card.grid_propagate(False)
+                tk.Label(
+                    card,
+                    text=formatear_valor(card_data.get("value", "--")),
+                    bg=COLOR_CARD,
+                    fg="white",
+                    font=("Segoe UI", 20, "bold"),
+                ).pack(anchor="w", padx=15, pady=(15, 0))
+                tk.Label(
+                    card,
+                    text=card_data.get("label", ""),
+                    bg=COLOR_CARD,
+                    fg="#9fb8d9",
+                    font=("Segoe UI", 10),
+                ).pack(anchor="w", padx=15, pady=(5, 0))
+
+            # Nodos Estratégicos
+            tk.Label(
+                body,
+                text="Nodos Estratégicos Identificados",
+                bg=COLOR_BG,
+                fg="white",
+                font=("Segoe UI", 14, "bold"),
+            ).pack(anchor="w", padx=10, pady=(20, 5))
+
+            nodos_frame = tk.Frame(body, bg=COLOR_BG)
+            nodos_frame.pack(fill="x", padx=5)
+
+            for nodo in datos.get("nodos", []):
+                card = tk.Frame(nodos_frame, bg=COLOR_CARD, highlightbackground="#213658", highlightthickness=1)
+                card.pack(fill="x", padx=5, pady=6)
+
+                header = tk.Frame(card, bg=COLOR_CARD)
+                header.pack(fill="x", padx=15, pady=10)
+
+                badge = tk.Frame(header, bg="#1a2d4a", width=54, height=54)
+                badge.pack(side="left")
+                badge.pack_propagate(False)
+                tk.Label(
+                    badge,
+                    text=nodo.get("sigla", "--"),
+                    bg="#1a2d4a",
+                    fg="white",
+                    font=("Segoe UI", 13, "bold"),
+                ).pack(expand=True)
+
+                info = tk.Frame(header, bg=COLOR_CARD)
+                info.pack(side="left", padx=15, fill="x", expand=True)
+                tk.Label(
+                    info,
+                    text=nodo.get("nombre", "--"),
+                    bg=COLOR_CARD,
+                    fg="white",
+                    font=("Segoe UI", 12, "bold"),
+                ).pack(anchor="w")
+                tk.Label(
+                    info,
+                    text=nodo.get("rol", ""),
+                    bg=COLOR_CARD,
+                    fg="#9fb8d9",
+                    font=("Segoe UI", 10),
+                ).pack(anchor="w", pady=(2, 0))
+
+                chip_color = COLOR_ACCENT if nodo.get("nivel") == "Crítico" else ("#f97316" if nodo.get("nivel") == "Alto" else "#14b8a6")
+                tk.Label(
+                    header,
+                    text=f"{nodo.get('nivel', '--')} nivel",
+                    bg=chip_color,
+                    fg="white",
+                    font=("Segoe UI", 9, "bold"),
+                    padx=12,
+                    pady=3,
+                ).pack(side="right")
+
+                metrics = tk.Frame(card, bg=COLOR_CARD)
+                metrics.pack(fill="x", padx=15, pady=(0, 10))
+
+                for label, valor in [
+                    ("Extorsión", nodo.get("extorsion", 0)),
+                    ("Sicariato/Homicidios", nodo.get("sicariato", 0)),
+                    ("Casos totales", nodo.get("total", 0)),
+                ]:
+                    item = tk.Frame(metrics, bg="#142643", width=150, height=50)
+                    item.pack(side="left", padx=5)
+                    item.pack_propagate(False)
+                    tk.Label(item, text=label, bg="#142643", fg="#9fb8d9", font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(6, 0))
+                    tk.Label(item, text=formatear_valor(valor), bg="#142643", fg="white", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=10)
+
+                tags = tk.Frame(card, bg=COLOR_CARD)
+                tags.pack(fill="x", padx=15, pady=(0, 8))
+                tk.Label(tags, text="Detectado por:", bg=COLOR_CARD, fg="#9fb8d9", font=("Segoe UI", 9)).pack(side="left")
+                for alg in nodo.get("algoritmos", []):
+                    tk.Label(
+                        tags,
+                        text=alg,
+                        bg="#1a2d4a",
+                        fg="white",
+                        font=("Segoe UI", 9, "bold"),
+                        padx=8,
+                        pady=2,
+                    ).pack(side="left", padx=4)
+
+                tk.Label(
+                    card,
+                    text=nodo.get("recomendacion", ""),
+                    bg=COLOR_CARD,
+                    fg="white",
+                    font=("Segoe UI", 10),
+                    wraplength=820,
+                    justify="left",
+                ).pack(fill="x", padx=15, pady=(0, 12))
+
+            # Rutas críticas
+            tk.Label(
+                body,
+                text="Rutas Críticas de Propagación",
+                bg=COLOR_BG,
+                fg="white",
+                font=("Segoe UI", 14, "bold"),
+            ).pack(anchor="w", padx=10, pady=(25, 8))
+
+            rutas_frame = tk.Frame(body, bg=COLOR_BG)
+            rutas_frame.pack(fill="x", padx=5)
+
+            riesgo_colores = {
+                "Riesgo crítico": COLOR_ACCENT,
+                "Riesgo alto": "#f97316",
+                "Riesgo medio": "#eab308",
+                "Riesgo bajo": "#14b8a6",
+            }
+
+            for ruta in datos.get("rutas", []):
+                card = tk.Frame(rutas_frame, bg="#111e37", highlightbackground="#242f4a", highlightthickness=1)
+                card.pack(fill="x", padx=5, pady=6)
+
+                header = tk.Frame(card, bg="#111e37")
+                header.pack(fill="x", padx=15, pady=10)
+
+                badge = tk.Label(
+                    header,
+                    text=ruta.get("id", "R"),
+                    bg="#1a2d4a",
+                    fg="white",
+                    font=("Segoe UI", 11, "bold"),
+                    width=4,
+                    pady=4,
+                )
+                badge.pack(side="left")
+
+                tk.Label(
+                    header,
+                    text=ruta.get("descripcion", "Corredor"),
+                    bg="#111e37",
+                    fg="white",
+                    font=("Segoe UI", 12, "bold"),
+                ).pack(side="left", padx=15)
+
+                tk.Label(
+                    header,
+                    text=ruta.get("riesgo", ""),
+                    bg=riesgo_colores.get(ruta.get("riesgo"), "#2563eb"),
+                    fg="white",
+                    font=("Segoe UI", 9, "bold"),
+                    padx=12,
+                    pady=3,
+                ).pack(side="right")
+
+                body_ruta = tk.Frame(card, bg="#111e37")
+                body_ruta.pack(fill="x", padx=15, pady=(0, 12))
+                tk.Label(
+                    body_ruta,
+                    text=ruta.get("path", ""),
+                    bg="#111e37",
+                    fg="#9fb8d9",
+                    font=("Segoe UI", 10, "italic"),
+                ).pack(anchor="w")
+
+                stats = tk.Frame(card, bg="#0d1627")
+                stats.pack(fill="x")
+                for label, valor in [("Casos acumulados", ruta.get("casos", 0)), ("Distancia", ruta.get("distancia", 0))]:
+                    sub = tk.Frame(stats, bg="#0d1627")
+                    sub.pack(side="left", padx=20, pady=10)
+                    tk.Label(sub, text=label, bg="#0d1627", fg="#9fb8d9", font=("Segoe UI", 9)).pack(anchor="w")
+                    tk.Label(sub, text=formatear_valor(valor), bg="#0d1627", fg="white", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+
+                tk.Label(
+                    card,
+                    text=ruta.get("estrategia", ""),
+                    bg="#111e37",
+                    fg="white",
+                    font=("Segoe UI", 10),
+                    wraplength=820,
+                    justify="left",
+                ).pack(fill="x", padx=15, pady=(0, 12))
+
+            # MST section
+            tk.Label(
+                body,
+                text="Red Mínima de Intervención (MST)",
+                bg=COLOR_BG,
+                fg="white",
+                font=("Segoe UI", 14, "bold"),
+            ).pack(anchor="w", padx=10, pady=(25, 8))
+
+            mst_wrapper = tk.Frame(body, bg=COLOR_BG)
+            mst_wrapper.pack(fill="x", padx=5, pady=(0, 20))
+            mst_wrapper.columnconfigure(0, weight=2)
+            mst_wrapper.columnconfigure(1, weight=1)
+
+            mst_left = tk.Frame(mst_wrapper, bg=COLOR_CARD)
+            mst_left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+            tk.Label(
+                mst_left,
+                text="Árbol de expansión mínima — Algoritmo Kruskal",
+                bg=COLOR_CARD,
+                fg="white",
+                font=("Segoe UI", 12, "bold"),
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+
+            mst_canvas = tk.Canvas(mst_left, width=360, height=240, bg="#051024", highlightthickness=0)
+            mst_canvas.pack(padx=15, pady=(0, 10))
+
+            img_path = datos.get("mst", {}).get("image_path")
+            if img_path and os.path.exists(img_path):
+                try:
+                    img = Image.open(img_path)
+                    img.thumbnail((340, 220), Image.Resampling.LANCZOS)
+                    resumen_data["mst_image"] = ImageTk.PhotoImage(img)
+                    mst_canvas.create_image(180, 120, image=resumen_data["mst_image"])
+                except Exception as exc:
+                    mst_canvas.create_text(180, 120, text=f"Error al cargar imagen: {exc}", fill="white", width=320)
+            else:
+                mst_canvas.create_text(180, 120, text="Sin visual disponible", fill="#9fb8d9")
+
+            metrics_frame = tk.Frame(mst_left, bg=COLOR_CARD)
+            metrics_frame.pack(fill="x", padx=15, pady=(0, 15))
+            for metric in datos.get("mst", {}).get("metrics", []):
+                block = tk.Frame(metrics_frame, bg="#142643", width=120, height=60)
+                block.pack(side="left", padx=5)
+                block.pack_propagate(False)
+                tk.Label(block, text=metric.get("label", ""), bg="#142643", fg="#9fb8d9", font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(8, 0))
+                tk.Label(block, text=formatear_valor(metric.get("value", "--")), bg="#142643", fg="white", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10)
+
+            mst_right = tk.Frame(mst_wrapper, bg=COLOR_CARD)
+            mst_right.grid(row=0, column=1, sticky="nsew")
+
+            tk.Label(
+                mst_right,
+                text="Conexiones críticas",
+                bg=COLOR_CARD,
+                fg="white",
+                font=("Segoe UI", 12, "bold"),
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+
+            for conn in datos.get("mst", {}).get("conexiones", []):
+                fila = tk.Frame(mst_right, bg="#142643")
+                fila.pack(fill="x", padx=15, pady=4)
+                tk.Label(fila, text=conn.get("rank", 0), bg="#1a2d4a", fg="white", font=("Segoe UI", 10, "bold"), width=3).pack(side="left", padx=6, pady=6)
+                tk.Label(
+                    fila,
+                    text=conn.get("enlace", "--"),
+                    bg="#142643",
+                    fg="white",
+                    font=("Segoe UI", 10, "bold"),
+                ).pack(side="left")
+                tk.Label(
+                    fila,
+                    text=formatear_valor(conn.get("casos", "--")),
+                    bg="#142643",
+                    fg="#9fb8d9",
+                    font=("Segoe UI", 10),
+                ).pack(side="right", padx=6)
+
+            tk.Label(
+                mst_right,
+                text="Métricas del MST",
+                bg=COLOR_CARD,
+                fg="#9fb8d9",
+                font=("Segoe UI", 10, "bold"),
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+            for insight in datos.get("mst", {}).get("insights", []):
+                tk.Label(
+                    mst_right,
+                    text=f"{insight.get('label')}: {insight.get('value')}",
+                    bg=COLOR_CARD,
+                    fg="white",
+                    font=("Segoe UI", 10),
+                ).pack(anchor="w", padx=15, pady=2)
+
+        def generar_resumen(auto=False):
+            nonlocal btn_generar
+            depto = depto_var.get().strip()
+            tipo_label = tipo_var.get()
+            crime_value = tipo_map.get(tipo_label, "TODO")
+            if not depto:
+                estado_var.set("Selecciona un departamento válido.")
+                return
+            if btn_generar:
+                btn_generar.config(state="disabled")
+            estado_var.set("Generando resumen actualizado...")
+            vista.update_idletasks()
+            try:
+                datos = B_resultados.generar_resumen_ui(DF_SIDPOL, GDF_GEO, depto, crime_value)
+            except Exception as exc:
+                estado_var.set(f"No se pudo generar el resumen: {exc}")
+                if btn_generar:
+                    btn_generar.config(state="normal")
+                return
+
+            render_resumen(datos)
+            estado_var.set(f"Resumen actualizado para {depto}.")
+            ULTIMO_FILTRO_ALGORITMOS["departamento"] = depto
+            ULTIMO_FILTRO_ALGORITMOS["tipo_label"] = tipo_label
+            ULTIMO_FILTRO_ALGORITMOS["tipo_value"] = crime_value
+            if btn_generar:
+                btn_generar.config(state="normal")
+
+        btn_generar = tk.Button(
+            boton_frame,
+            text="Generar resumen",
+            bg="#12D0A5",
+            fg="#051427",
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            cursor="hand2",
+            command=generar_resumen,
+        )
+        btn_generar.pack(pady=(10, 0), padx=5)
+
+        tk.Label(
+            filtros,
+            textvariable=estado_var,
+            bg="#081629",
+            fg="#9fb8d9",
+            font=("Segoe UI", 9, "italic"),
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=10)
+
+        if default_depto:
+            vista.after(400, lambda: generar_resumen(auto=True))
 
     # Footer usuario
     tk.Frame(panel, bg="#0F2238", height=60, width=250).place(x=0, y=ALTO-60)

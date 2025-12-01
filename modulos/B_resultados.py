@@ -11,7 +11,25 @@ from typing import List, Dict, Tuple, Optional
 from modulos.B_algoritmos import _filter_subgraph, _get_case_count, _create_graph_from_data, expansion_tree, floyd_warshall_routes, kruskal_mst_analysis
 
 # --- Subtipos de Delito Focales para el Reporte Estratégico ---
-CRIME_FOCUS_TYPES = ['EXTORSIÓN', 'HOMICIDIOS', 'SICARIATO'] 
+CRIME_FOCUS_TYPES = ['EXTORSIÓN', 'HOMICIDIOS', 'SICARIATO']
+
+
+def _sigla_distrito(nombre: str) -> str:
+    tokens = [t for t in nombre.split() if t]
+    if not tokens:
+        return (nombre[:3] or "ND").upper()
+    if len(tokens) == 1:
+        return tokens[0][:3].upper()
+    return "".join(token[0] for token in tokens[:3]).upper()
+
+
+def _formatear_numero(valor: float) -> str:
+    try:
+        if isinstance(valor, (int, float)):
+            return f"{valor:,}".replace(",", ".")
+    except Exception:
+        pass
+    return str(valor)
 
 
 def _preparar_datos_filtrados(df_delitos: pd.DataFrame, gdf_geo: gpd.GeoDataFrame, department: str) -> Tuple[pd.DataFrame, gpd.GeoDataFrame]:
@@ -98,15 +116,17 @@ def consolidar_resultados(G_base: nx.Graph, department: str, epicentro: str) -> 
         num_distritos_puente = 0
         bridge_nodes_list = []
 
+    mst_stats = kruskal_stats.get('stats', {}) if isinstance(kruskal_stats, dict) else {}
+
     metrica_global = {
         'total_distritos_analizados': total_nodos_subgraph,
         'total_casos_focus_subtipos': total_casos_focus_subgraph,
         'total_epicentro_detectados': 1, 
-        'total_rutas_criticas_fw': fw_stats.get('num_caminos_calculados', 0),
+        'total_rutas_criticas_fw': fw_stats.get('stats', {}).get('num_caminos_calculados', 0) if isinstance(fw_stats, dict) else fw_stats.get('num_caminos_calculados', 0),
         'total_distritos_puente': num_distritos_puente,
-        'total_conexiones_mst': kruskal_stats.get('MST_aristas', 0),
-        'total_casos_ruta_max_conc': fw_stats.get('mayor_concentracion_casos', 0),
-        'peso_total_mst_inverso': kruskal_stats.get('peso_total_MST', 0),
+        'total_conexiones_mst': mst_stats.get('MST_aristas', 0),
+        'total_casos_ruta_max_conc': fw_stats.get('stats', {}).get('mayor_concentracion_casos', 0) if isinstance(fw_stats, dict) else fw_stats.get('mayor_concentracion_casos', 0),
+        'peso_total_mst_inverso': mst_stats.get('peso_total_MST', 0),
     }
     reporte_final['Métricas Globales'] = metrica_global
     
@@ -182,29 +202,27 @@ def consolidar_resultados(G_base: nx.Graph, department: str, epicentro: str) -> 
     
     # ... (Se mantiene la lógica original) ...
     mst_metrica = {
-        'MST_nodos': kruskal_stats.get('MST_nodos', 0),
-        'MST_aristas': kruskal_stats.get('MST_aristas', 0),
-        'aristas_eliminadas': kruskal_stats.get('aristas_eliminadas', 0),
-        'peso_total_MST_inverso': f"{kruskal_stats.get('peso_total_MST', 0):.4f}",
-        'reduccion_complejidad_pct': kruskal_stats.get('reduccion_peso_pct', 0),
-        'cobertura_territorial': kruskal_stats.get('cobertura_territorial', "0.00%"),
-        'eficiencia_complejidad': f"Se mantiene el {kruskal_stats.get('cobertura_territorial', '0.00%')} del territorio con una reducción de {kruskal_stats.get('reduccion_peso_pct', 0):.2f}% en la complejidad de la red."
+        'MST_nodos': mst_stats.get('MST_nodos', 0),
+        'MST_aristas': mst_stats.get('MST_aristas', 0),
+        'aristas_eliminadas': mst_stats.get('aristas_eliminadas', 0),
+        'peso_total_MST_inverso': f"{mst_stats.get('peso_total_MST', 0):.4f}",
+        'reduccion_complejidad_pct': mst_stats.get('reduccion_peso_pct', 0),
+        'cobertura_territorial': mst_stats.get('cobertura_territorial', "0.00%"),
+        'eficiencia_complejidad': f"Se mantiene el {mst_stats.get('cobertura_territorial', '0.00%')} del territorio con una reducción de {mst_stats.get('reduccion_peso_pct', 0):.2f}% en la complejidad de la red."
     }
     reporte_final['Métricas MST'] = mst_metrica
     
-    central_column_rank = kruskal_stats.get('central_column_rank', []) 
     conexiones_reporte = []
+    central_column_rank = kruskal_stats.get('central_column', [])
     
-    for u, v, cost in central_column_rank:
-        cases_u = _get_case_count(G_filtered, u, CRIME_FOCUS_TYPES)
-        cases_v = _get_case_count(G_filtered, v, CRIME_FOCUS_TYPES)
-        
-        conexiones_reporte.append({
-            'Conexión (Distritos)': f"{u} <-> {v}",
-            'Casos Acumulados (Focus)': cases_u + cases_v,
-            'Costo (Peso Inverso)': f"{cost:.4f}",
-            'Recomendación': "Enlace de Mínima Conexión, crucial para la intervención centralizada."
-        })
+    for enlace in central_column_rank:
+        if isinstance(enlace, dict):
+            conexiones_reporte.append({
+                'Conexión (Distritos)': enlace.get('Enlace', '--'),
+                'Casos Acumulados (Focus)': enlace.get('Casos Acumulados', '--'),
+                'Costo (Peso Inverso)': enlace.get('Costo (MST)', '--'),
+                'Recomendación': enlace.get('Recomendación', "Enlace de Mínima Conexión, crucial para la intervención centralizada."),
+            })
         
     reporte_final['Conexiones Críticas MST'] = conexiones_reporte
 
@@ -356,3 +374,190 @@ def mostrar_resultados(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department_name:
 
     print("[INFO] 4/4. Generando reporte escrito final.")
     imprimir_reporte_final(reporte_final_data)
+
+
+def generar_resumen_ui(
+    df: pd.DataFrame,
+    gdf: gpd.GeoDataFrame,
+    department: str,
+    crime_filter: Optional[str] = "TODO",
+):
+    """Construye un resumen estructurado para la vista gráfica de Resultados."""
+
+    from modulos import B_algoritmos  # importación diferida para evitar ciclos
+
+    G, crime_types = B_algoritmos.preparar_grafo_para_algoritmos(
+        df,
+        gdf,
+        department,
+        crime_filter,
+        verbose=False,
+    )
+
+    if not G or not G.nodes:
+        raise ValueError("No se pudo construir el grafo para los filtros seleccionados.")
+
+    # Epicentro = distrito con mayor acumulado
+    epicentro = max(
+        G.nodes,
+        key=lambda n: _get_case_count(G, n, crime_types),
+    )
+
+    bfs = B_algoritmos.expansion_tree(
+        G,
+        epicentro,
+        method="bfs",
+        crime_types=crime_types,
+        department=department,
+        show_plot=False,
+        verbose=False,
+    )
+    fw = B_algoritmos.floyd_warshall_routes(
+        G,
+        crime_types=crime_types,
+        mode="volume",
+        department=department,
+        show_plot=False,
+        verbose=False,
+    )
+    kruskal = B_algoritmos.kruskal_mst_analysis(
+        G,
+        k=None,
+        crime_types=crime_types,
+        department=department,
+        show_plot=False,
+        verbose=False,
+    )
+
+    fw_paths = fw.get("critical_paths", []) if fw else []
+    fw_stats = fw.get("stats", {}) if fw else {}
+    bridge_nodes = set(fw.get("bridge_nodes", [])) if fw else set()
+
+    mst_stats = kruskal.get("stats", {}) if kruskal else {}
+    mst_connections = kruskal.get("central_column", []) if kruskal else []
+    mst_image = kruskal.get("image_path") if kruskal else None
+
+    # --- Tarjetas resumen ---
+    total_epicentros = max(1, len(bfs.get("clusters", [])) if bfs else 1)
+    total_rutas = len(fw_paths)
+    total_puentes = len(bridge_nodes)
+    total_conexiones_mst = mst_stats.get("MST_aristas", 0)
+    casos_rutas = sum(ruta.get("concentration", 0) for ruta in fw_paths[:3])
+
+    cards = [
+        {"label": "Epicentros detectados", "value": total_epicentros},
+        {"label": "Rutas críticas", "value": total_rutas},
+        {"label": "Distritos puente", "value": total_puentes},
+        {"label": "Conexiones MST", "value": total_conexiones_mst},
+        {"label": "Casos en rutas críticas", "value": casos_rutas},
+    ]
+
+    # --- Nodos estratégicos ---
+    cases_list = [_get_case_count(G, n, crime_types) for n in G.nodes]
+    p75 = np.percentile(cases_list, 75) if cases_list else 0
+    p55 = np.percentile(cases_list, 55) if cases_list else 0
+    bfs_nodes = {n for level in bfs.get("levels", []) for n in level.get("nodes", [])} if bfs else set()
+    fw_nodes = {n for ruta in fw_paths for n in ruta.get("path", [])}
+    mst_nodes = {item.get("distrito") for item in kruskal.get("critical_nodes", [])} if kruskal else set()
+
+    nodos = []
+    for node in sorted(G.nodes, key=lambda n: _get_case_count(G, n, crime_types), reverse=True):
+        cases = _get_case_count(G, node, crime_types)
+        info = G.nodes[node]
+        casos_tipo = info.get("cases_by_type", {})
+        extorsion = casos_tipo.get("EXTORSIÓN", casos_tipo.get("EXTORSION", 0))
+        sicariato = casos_tipo.get("SICARIATO", 0) + casos_tipo.get("HOMICIDIOS", 0)
+
+        nivel = "Crítico" if cases >= p75 else ("Alto" if cases >= p55 else "Medio")
+        rol = "Epicentro principal" if node == epicentro else (
+            "Nodo puente estratégico" if node in bridge_nodes else "Distrito de tránsito"
+        )
+
+        algoritmos = []
+        if node in bfs_nodes or node == epicentro:
+            algoritmos.append("BFS")
+        if node in fw_nodes:
+            algoritmos.append("Floyd")
+        if node in mst_nodes:
+            algoritmos.append("Kruskal")
+
+        recomendacion = []
+        if node == epicentro:
+            recomendacion.append("Requiere intervención inmediata. Mayor concentración registrada.")
+        if node in bridge_nodes:
+            recomendacion.append("Distrito puente que conecta múltiples corredores.")
+        if node in mst_nodes:
+            recomendacion.append("Clave en la red mínima; mantener vigilancia.")
+        if not recomendacion:
+            recomendacion.append("Zona monitoreada. Refuerza patrullaje preventivo.")
+
+        nodos.append({
+            "nombre": node,
+            "sigla": _sigla_distrito(node),
+            "rol": rol,
+            "nivel": nivel,
+            "extorsion": extorsion,
+            "sicariato": sicariato,
+            "total": cases,
+            "algoritmos": algoritmos,
+            "recomendacion": " ".join(recomendacion),
+        })
+
+    nodos = nodos[:5]
+
+    # --- Rutas críticas ---
+    rutas = []
+    for idx, ruta in enumerate(fw_paths[:3], start=1):
+        path = ruta.get("path", [])
+        riesgo = "Riesgo crítico" if idx == 1 else ("Riesgo alto" if idx == 2 else "Riesgo medio")
+        estrategia = "Establecer intervención en puntos intermedios." if idx == 1 else (
+            "Operativo conjunto en distritos del corredor." if idx == 2 else "Monitoreo reforzado de accesos."
+        )
+        rutas.append({
+            "id": f"R{idx}",
+            "descripcion": "Corredor delictivo prioritario" if idx == 1 else "Corredor supervisado",
+            "path": " -> ".join(path),
+            "casos": ruta.get("concentration", 0),
+            "distancia": max(1, len(path) - 1),
+            "riesgo": riesgo,
+            "estrategia": estrategia,
+        })
+
+    # --- Sección MST ---
+    mst_metrics = [
+        {"label": "Nodos", "value": mst_stats.get("MST_nodos", "--")},
+        {"label": "Aristas MST", "value": mst_stats.get("MST_aristas", "--")},
+        {"label": "Peso total", "value": int(round(mst_stats.get("peso_total_MST", 0)))},
+        {"label": "Reducción", "value": f"{mst_stats.get('reduccion_peso_pct', 0):.0f}%"},
+    ]
+
+    conexiones_rank = []
+    for idx, item in enumerate(mst_connections, start=1):
+        conexiones_rank.append({
+            "rank": idx,
+            "enlace": item.get("Enlace", "--"),
+            "casos": item.get("Casos Acumulados", "--"),
+        })
+
+    insights = [
+        {"label": "Cobertura territorial", "value": mst_stats.get("cobertura_territorial", "--")},
+        {"label": "Eficiencia", "value": "Alta" if mst_stats.get("reduccion_peso_pct", 0) >= 10 else "Media"},
+        {"label": "Complejidad reducida", "value": f"{mst_stats.get('reduccion_peso_pct', 0):.2f}%"},
+    ]
+
+    mst_section = {
+        "image_path": mst_image,
+        "metrics": mst_metrics,
+        "conexiones": conexiones_rank,
+        "insights": insights,
+    }
+
+    return {
+        "department": department,
+        "crime_types": crime_types,
+        "epicentro": epicentro,
+        "cards": cards,
+        "nodos": nodos,
+        "rutas": rutas,
+        "mst": mst_section,
+    }
