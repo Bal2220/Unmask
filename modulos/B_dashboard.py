@@ -1,9 +1,8 @@
 # Modulos/B_dashboard.py
-import mapclassify
+import numpy as np
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 
 #METRICAS PRINCIPALES
 def calcular_total_nacional(df):
@@ -26,22 +25,44 @@ def contar_casos(df, tipo_crimen):
     """Cuenta el número de casos de un tipo específico de crimen."""
     return df[df['SUB_TIPO'] == tipo_crimen].shape[0]
 
+def contar_casos_modalidad(df, modalidades=None):
+    """Cuenta casos por modalidad, aceptando múltiples etiquetas."""
+    if 'MODALIDAD' not in df.columns:
+        return 0
+
+    if modalidades is None:
+        modalidades = [
+            'SICARIATO',
+            'CONSPIRACION Y OFRECIMIENTO PARA EL DELITO DE SICARIATO'
+        ]
+
+    modalidades_upper = {m.upper() for m in modalidades}
+    col = df['MODALIDAD'].fillna('').astype(str).str.upper()
+    return int(col.isin(modalidades_upper).sum())
+
 # TOP 5 DEPARTAMENTOS
-def top_5_departamentos(df, top_n=5):
-    # Filtrar solo Extorsión y Homicidio
-    df_specific_crimes_departments = df[df['SUB_TIPO'].isin(['EXTORSION', 'HOMICIDIO'])]
-    
-    # Contar casos por departamento
-    crime_volume_by_department_specific = df_specific_crimes_departments['DPTO_HECHO_NEW'].value_counts()
-    
-    # Obtener top N
-    top_5_departments_specific_crimes = crime_volume_by_department_specific.head(top_n)
-    
-    # Mostrar resultado
-    print(f"\nTop {top_n} Departamentos con mayor volumen de Extorsión y Homicidio (2024-2025):")
-    print(top_5_departments_specific_crimes)
-    
-    return top_5_departments_specific_crimes
+def top_5_departamentos(df, anios=None, top_n=5):
+    crime_volume = _agrupar_crimenes_por_departamento(
+        df,
+        anios=anios,
+        subtipos=['EXTORSION', 'HOMICIDIO']
+    )
+
+    ranking = crime_volume.sort_values('Crime_Count', ascending=False).head(top_n)
+    series = pd.Series(
+        data=ranking['Crime_Count'].values,
+        index=ranking['DPTO_HECHO_NEW']
+    )
+
+    periodo_str = (
+        f" ({min(anios)}-{max(anios)})" if anios else ""
+    )
+    print(
+        f"\nTop {top_n} Departamentos con mayor volumen de Extorsión y Homicidio{periodo_str}:"
+    )
+    print(series)
+
+    return series
 
 # ALERTA NACIONAL
 def alerta_nacional(df, anio=2025):
@@ -91,63 +112,128 @@ def alerta_nacional(df, anio=2025):
     return mensaje_alerta
 
 
-# MAPA DE CALOR
-def mapa_calor_crimenes(df, geojson_path='data/peru_departamental_simple.geojson', anios=[2024, 2025]):
-    """
-    Genera un único mapa de calor por departamento para Extorsión y Homicidio sumando los años indicados.
-    """
-    # Filtrar solo Extorsión y Homicidio
-    df_specific = df[(df['ANIO'].isin(anios)) & (df['SUB_TIPO'].isin(['EXTORSION', 'HOMICIDIO']))]
+def _agrupar_crimenes_por_departamento(
+    df,
+    anios=None,
+    subtipos=None,
+    columna='DPTO_HECHO_NEW'
+):
+    """Devuelve DataFrame con columnas departamento y Crime_Count normalizadas."""
+    data = df.copy()
 
-    # Conteo de crímenes por departamento
-    crime_volume = df_specific.groupby('DPTO_HECHO_NEW').size().reset_index(name='Crime_Count')
+    if anios is not None:
+        data = data[data['ANIO'].isin(anios)]
+    if subtipos is not None:
+        data = data[data['SUB_TIPO'].isin(subtipos)]
 
-    # Consolidar Lima Metropolitana + Región Lima
-    if 'LIMA METROPOLITANA' in crime_volume['DPTO_HECHO_NEW'].values and 'REGION LIMA' in crime_volume['DPTO_HECHO_NEW'].values:
-        total_lima = crime_volume.loc[crime_volume['DPTO_HECHO_NEW']=='LIMA METROPOLITANA', 'Crime_Count'].iloc[0] + \
-                     crime_volume.loc[crime_volume['DPTO_HECHO_NEW']=='REGION LIMA', 'Crime_Count'].iloc[0]
-        crime_volume = pd.concat(
-            [crime_volume, pd.DataFrame([{'DPTO_HECHO_NEW': 'LIMA', 'Crime_Count': total_lima}])],
+    conteo = (
+        data.groupby(columna, dropna=False)
+        .size()
+        .reset_index(name='Crime_Count')
+    )
+
+    conteo[columna] = (
+        conteo[columna]
+        .fillna('SIN REGISTRO')
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    lima_alias = {'LIMA', 'LIMA METROPOLITANA', 'REGION LIMA'}
+    lima_total = conteo[conteo[columna].isin(lima_alias)]['Crime_Count'].sum()
+    conteo = conteo[~conteo[columna].isin(lima_alias)].copy()
+    if lima_total > 0:
+        conteo = pd.concat(
+            [conteo, pd.DataFrame([{columna: 'LIMA', 'Crime_Count': int(lima_total)}])],
             ignore_index=True
         )
-        crime_volume = crime_volume[~crime_volume['DPTO_HECHO_NEW'].isin(['LIMA METROPOLITANA', 'REGION LIMA'])]
+
+    conteo = conteo.groupby(columna, as_index=False)['Crime_Count'].sum()
+    return conteo
+
+
+# MAPA DE CALOR
+def mapa_calor_crimenes(
+    df,
+    geojson_path='data/peru_departamental_simple.geojson',
+    anios=[2024, 2025],
+    save_path=None,
+    show_plot=True
+):
+    """
+    Genera un mapa de calor por departamento para Extorsión y Homicidio.
+
+    - Si save_path es un string, guarda la figura como PNG en esa ruta.
+    - Si show_plot es True, muestra la ventana de Matplotlib; si es False, no la muestra.
+    """
+    crime_volume = _agrupar_crimenes_por_departamento(
+        df,
+        anios=anios,
+        subtipos=['EXTORSION', 'HOMICIDIO']
+    )
 
     # Cargar GeoJSON y merge
     peru_gdf = gpd.read_file(geojson_path)
     peru_gdf['NOMBDEP'] = peru_gdf['NOMBDEP'].str.upper()
     crime_volume['DPTO_HECHO_NEW'] = crime_volume['DPTO_HECHO_NEW'].str.upper()
-    merged_gdf = peru_gdf.merge(crime_volume, left_on='NOMBDEP', right_on='DPTO_HECHO_NEW', how='left')
-    merged_gdf_proj = merged_gdf.to_crs(epsg=3857)
-    merged_gdf_proj['Crime_Count'] = merged_gdf_proj['Crime_Count'].fillna(0).astype(int)
-
-    # Plot del mapa de calor más grande
-    fig, ax = plt.subplots(1, 1, figsize=(18, 16))  # mapa más grande
-    merged_gdf_proj.plot(
-        column='Crime_Count',
-        cmap='Reds',
-        linewidth=0.8,
-        ax=ax,
-        edgecolor='0.8',
-        legend=True,
-        scheme='quantiles',
-        k=5,
-        legend_kwds={
-            'loc': 'upper left',
-            'bbox_to_anchor': (1, 1),  # mueve la leyenda fuera del mapa
-            'title': f'Número de Crímenes ({min(anios)}-{max(anios)})'
-        }
+    merged_gdf = peru_gdf.merge(
+        crime_volume,
+        left_on='NOMBDEP',
+        right_on='DPTO_HECHO_NEW',
+        how='left'
     )
 
-    # Formatear colorbar a enteros con rangos
-    cbar = ax.get_figure().axes[-1]
-    ticks = cbar.get_yticks()
-    ticks_labels = []
-    for i in range(len(ticks)-1):
-        ticks_labels.append(f"{int(ticks[i])}-{int(ticks[i+1])}")
-    cbar.set_yticklabels(ticks_labels)
-    cbar.set_ylabel(f'Número de Crímenes ({min(anios)}-{max(anios)})', fontsize=12)
+    merged_gdf['Crime_Count'] = merged_gdf['Crime_Count'].fillna(0).astype(int)
+    merged_gdf_proj = merged_gdf.to_crs(epsg=3857)
 
-    # Anotaciones de valores en los departamentos
+    # ---------- CLASIFICACIÓN DINÁMICA (tonos rojos) ----------
+    valores = merged_gdf_proj['Crime_Count']
+    max_val = int(valores.max())
+
+    if max_val == 0:
+        legend_levels = ['Sin registros']
+        color_map = {'Sin registros': '#FAD1C8'}
+        merged_gdf_proj['categoria_riesgo'] = legend_levels[0]
+        merged_gdf_proj['color'] = color_map[legend_levels[0]]
+    else:
+        q_bajo = int(np.percentile(valores, 40))
+        q_alto = int(np.percentile(valores, 75))
+
+        # Evitar cortes iguales para que siempre exista un tramo "alto"
+        if q_bajo <= 0:
+            q_bajo = 1
+        if q_alto <= q_bajo:
+            q_alto = q_bajo + max(1, int(max_val * 0.1))
+
+        fmt_num = lambda x: f"{int(round(x)):,}".replace(',', '.')
+        legend_levels = [
+            f"Riesgo Bajo (≤{fmt_num(q_bajo)})",
+            f"Riesgo Medio ({fmt_num(q_bajo + 1)}–{fmt_num(q_alto)})",
+            f"Riesgo Alto (>{fmt_num(q_alto)})",
+        ]
+        legend_colors = ['#FFE5D9', '#F59C9C', '#B3001B']  # claros → oscuro
+        color_map = dict(zip(legend_levels, legend_colors))
+
+        merged_gdf_proj['categoria_riesgo'] = pd.cut(
+            valores,
+            bins=[-float('inf'), q_bajo, q_alto, float('inf')],
+            labels=legend_levels,
+            include_lowest=True
+        )
+        merged_gdf_proj['color'] = merged_gdf_proj['categoria_riesgo'].map(color_map)
+
+    # ---------- PLOT ----------
+    fig, ax = plt.subplots(1, 1, figsize=(13, 7.5))
+
+    merged_gdf_proj.plot(
+        ax=ax,
+        color=merged_gdf_proj['color'],
+        edgecolor='0.8',
+        linewidth=0.8
+    )
+
+    # Anotaciones de valores
     for geom, label in zip(merged_gdf_proj.geometry, merged_gdf_proj['Crime_Count']):
         point = geom.representative_point()
         ax.annotate(
@@ -157,27 +243,51 @@ def mapa_calor_crimenes(df, geojson_path='data/peru_departamental_simple.geojson
             textcoords="offset points",
             ha='center',
             va='center',
-            fontsize=8,
-            color='white' if label > 778 else 'black'
+            fontsize=7,
+            color='white' if label >= 1000 else 'black'
         )
 
-    ax.set_title(
-        f'Mapa de Calor de Crímenes (Extorsión y Homicidio) por Departamento en Perú ({min(anios)}-{max(anios)})',
-        fontsize=18
-    )
     ax.set_axis_off()
-    plt.tight_layout()  # para que se acomode todo sin recortes
-    plt.show()
+
+    # Leyenda manual que sí coincide con los colores
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=color_map[label], edgecolor='k', label=label)
+        for label in legend_levels
+    ]
+
+    legend = ax.legend(
+        handles=legend_elements,
+        loc='lower left',
+        bbox_to_anchor=(0.02, 0.02),
+        ncol=len(legend_elements),
+        frameon=False
+    )
+    for text in legend.get_texts():
+        text.set_fontsize(9)
+
+    plt.tight_layout()
+
+    # Guardar PNG si corresponde
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+
+    # Mostrar o cerrar según flag
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
     return merged_gdf_proj
 
 
-def mostrar_dashboard(df):
+def mostrar_dashboard(df, render_map=True, map_kwargs=None):
     # Métricas principales
     total_nacional = calcular_total_nacional(df)
     distritos_afectados, departamentos_afectados, porcentaje = calcular_distritos_afectados(df)
     casos_homicidio = contar_casos(df, 'HOMICIDIO')
     casos_extorsion = contar_casos(df, 'EXTORSION')
+    casos_sicariato = contar_casos_modalidad(df)
     
     print("\n--- DASHBOARD ---")
     print(f"\nTOTAL NACIONAL de denuncias SIDPOL (2024-2025): {total_nacional}")
@@ -185,15 +295,20 @@ def mostrar_dashboard(df):
     print(f"Departamentos afectados: {departamentos_afectados} ({porcentaje:.2f}% del Perú)")
     print(f"Casos de Homicidio: {casos_homicidio}")
     print(f"Casos de Extorsión: {casos_extorsion}")
+    print(f"Casos de Sicariato: {casos_sicariato}")
     
     # top 5 departamentos
-    top_departments = top_5_departamentos(df)
+    anios_analisis = [2024, 2025]
+    top_departments = top_5_departamentos(df, anios=anios_analisis)
     
     # Mostrar alerta nacional 2025
     mensaje_alerta = alerta_nacional(df, anio=2025)
     
     # mapa de calor
-    mapa_calor_crimenes(df)
+    if render_map:
+        mapa_args = map_kwargs.copy() if map_kwargs else {}
+        mapa_args.setdefault('anios', anios_analisis)
+        mapa_calor_crimenes(df, **mapa_args)
     
     # Retornar todas las métricas y datos útiles
     return {
@@ -203,6 +318,7 @@ def mostrar_dashboard(df):
         "porcentaje_distritos": porcentaje,
         "casos_homicidio": casos_homicidio,
         "casos_extorsion": casos_extorsion,
+        "casos_sicariato": casos_sicariato,
         "top_departamentos": top_departments,
         "alerta_nacional": mensaje_alerta
     }

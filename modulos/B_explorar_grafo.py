@@ -1,6 +1,5 @@
 # Modulos/B_explorar_grafo.py
 
-import graphviz as gv
 import pandas as pd
 import numpy as np
 import networkx as nx
@@ -8,7 +7,20 @@ import graphviz
 import os
 from IPython.display import display, Image
 from datetime import datetime
-from thefuzz import process
+from typing import Dict, List
+
+# Configuración de filtros disponibles para reutilizar en la GUI.
+TIPO_DELITO_OPCIONES: List[Dict[str, str]] = [
+    {"label": "Todos", "value": "TODO"},
+    {"label": "Solo Extorsión", "value": "SOLO_EXTORSION"},
+    {"label": "Solo Sicariato", "value": "SOLO_SICARIATO"},
+    {"label": "Extorsión y Sicariato", "value": "AMBOS"},
+]
+
+COLOR_POR_OPCIONES: List[Dict[str, str]] = [
+    {"label": "Volumen de casos", "value": "cases"},
+    {"label": "Conectividad", "value": "connectivity"},
+]
 
 
 def pedir_parametros_usuario(df):
@@ -29,6 +41,24 @@ def pedir_parametros_usuario(df):
     print("Año:", year)
 
     return dep, crime_type, year
+
+def obtener_opciones_filtros(df: pd.DataFrame) -> Dict[str, List[str]]:
+    departamentos = sorted(
+        {
+            str(dep).strip()
+            for dep in df["DPTO_HECHO_NEW"].dropna().unique()
+            if str(dep).strip()
+        }
+    )
+
+    anios = [str(int(a)) for a in sorted(df["ANIO"].dropna().unique())]
+
+    return {
+        "departamentos": departamentos,
+        "tipo_delito": TIPO_DELITO_OPCIONES,
+        "color_por": COLOR_POR_OPCIONES,
+        "anios": anios,
+    }
 
 def filtrar_dataframe(df, department, crime_type, year):
     # Intentar convertir el año a int si es posible
@@ -51,8 +81,17 @@ def filtrar_dataframe(df, department, crime_type, year):
     if crime_type_upper == "TODO":
         return df_dep
 
-    if crime_type_upper == "AMBOS":
+    if crime_type_upper in {"AMBOS", "EXTORSION Y SICARIATO"}:
         return df_dep[df_dep["TIPO"].isin(["EXTORSION", "HOMICIDIO"])]
+
+    if crime_type_upper in {"SOLO_EXTORSION", "SOLO EXTORSION"}:
+        return df_dep[df_dep["TIPO"].str.upper().str.strip() == "EXTORSION"]
+
+    if crime_type_upper in {"SOLO_SICARIATO", "SOLO SICARIATO"}:
+        return df_dep[
+            (df_dep["TIPO"].str.upper().str.strip() == "HOMICIDIO") |
+            (df_dep["SUB_TIPO"].str.upper().str.strip() == "SICARIATO")
+        ]
 
     # Filtro estándar: busca el tipo de crimen ingresado tanto en TIPO como en SUB_TIPO
     return df_dep[
@@ -198,15 +237,20 @@ def categorizar_distritos(df_centrality):
     ] = "Medium Crime"
     
     # --- LÓGICA DE CONECTIVIDAD (Sin cambios) ---
-    d_high = df["Degree Centrality"].quantile(0.75)
-    d_med = df["Degree Centrality"].quantile(0.50)
+    d_high = float(df["Degree Centrality"].quantile(0.75)) if not df.empty else 0.0
+    d_med = float(df["Degree Centrality"].quantile(0.50)) if not df.empty else 0.0
 
     df["Connectivity_Category"] = "Low Connectivity"
     df.loc[df["Degree Centrality"] >= d_med, "Connectivity_Category"] = "Medium Connectivity"
     df.loc[df["Degree Centrality"] >= d_high, "Connectivity_Category"] = "High Connectivity"
 
+    thresholds = {
+        "crime": {"high": int(high), "medium": int(medium)},
+        "connectivity": {"high": d_high, "medium": d_med},
+    }
+
     print("Distritos categorizados.")
-    return df
+    return df, thresholds
 
 def imprimir_estadisticas_grafo(G):
     """Muestra estadísticas básicas del grafo."""
@@ -218,7 +262,7 @@ def imprimir_estadisticas_grafo(G):
     print(f"Total de casos: {sum(nx.get_node_attributes(G, 'Crime_Count').values())}")
     print(f"Peso total aristas: {sum(nx.get_edge_attributes(G, 'weight').values())}")
 
-def graficar_grafo_graphviz(G, df_centrality, department_input):
+def graficar_grafo_graphviz(G, df_centrality, department_input, color_mode="cases", abrir_archivo=False):
 
     output_dir = "grafos_generados"
     os.makedirs(output_dir, exist_ok=True)
@@ -248,6 +292,16 @@ def graficar_grafo_graphviz(G, df_centrality, department_input):
         'High Crime': '#E7000B'
     }
 
+    connectivity_colors = {
+        'Low Connectivity': '#94A3B8',
+        'Medium Connectivity': '#FACC15',
+        'High Connectivity': '#38BDF8'
+    }
+
+    palette = crime_category_colors if color_mode != "connectivity" else connectivity_colors
+    category_key = "Crime_Category" if color_mode != "connectivity" else "Connectivity_Category"
+    default_category = 'Low Crime' if color_mode != "connectivity" else 'Low Connectivity'
+
     # --- NODOS ---
     for node_name in G.nodes():
         # Búsqueda robusta
@@ -255,17 +309,17 @@ def graficar_grafo_graphviz(G, df_centrality, department_input):
         
         if row_match.empty:
             crime_count = 0
-            crime_category = 'Low Crime'
+            node_category = default_category
         else:
             node_data = row_match.iloc[0]
             crime_count = node_data.get('Crime_Count', 0)
-            crime_category = node_data.get('Crime_Category', 'Low Crime')
+            node_category = node_data.get(category_key, default_category)
 
-        node_color = crime_category_colors.get(crime_category, '#CCCCCC') 
+        node_color = palette.get(node_category, '#CCCCCC') 
 
         main_font_size = 10
         crime_count_font_size = 8
-        if crime_category == 'High Crime':
+        if node_category in {'High Crime', 'High Connectivity'}:
             main_font_size = 12
             crime_count_font_size = 10
 
@@ -314,20 +368,106 @@ def graficar_grafo_graphviz(G, df_centrality, department_input):
 
     print(f"[✓] Grafo guardado en: {png_file}")
 
-    # Mostrar en VS Code (si aplica)
-    try:
-        display(Image(filename=png_file))
-    except:
-        pass
+    if abrir_archivo:
+        try:
+            display(Image(filename=png_file))
+        except:
+            pass
 
-    # Abrir automáticamente en Windows
-    try:
-        os.startfile(png_file)
-        print("[✓] Imagen abierta en el visor de Windows.")
-    except Exception as e:
-        print("[!] No se pudo abrir automáticamente:", e)
+        try:
+            os.startfile(png_file)
+            print("[✓] Imagen abierta en el visor de Windows.")
+        except Exception as e:
+            print("[!] No se pudo abrir automáticamente:", e)
 
     return png_file
+
+def construir_leyenda(color_mode: str, thresholds: Dict[str, Dict[str, float]]):
+    if color_mode == "connectivity":
+        limites = thresholds.get("connectivity", {})
+        high = limites.get("high", 0)
+        medium = limites.get("medium", 0)
+        return [
+            {"color": "#38BDF8", "label": f"Alta conectividad (≥ {high:.2f})"},
+            {"color": "#FACC15", "label": f"Media (≥ {medium:.2f})"},
+            {"color": "#94A3B8", "label": f"Baja (< {medium:.2f})"},
+        ]
+
+    limites = thresholds.get("crime", {})
+    high = max(int(limites.get("high", 1)), 1)
+    medium = max(int(limites.get("medium", 1)), 1)
+    rango_medio = f"{medium} - {max(high - 1, medium)}" if high > medium else f"≥ {medium}"
+
+    return [
+        {"color": "#E7000B", "label": f"Alta (≥ {high} casos)"},
+        {"color": "#FF6900", "label": f"Media ({rango_medio} casos)"},
+        {"color": "#00B8DB", "label": f"Baja (< {medium} casos)"},
+    ]
+
+def resumir_estadisticas(df_filtered: pd.DataFrame, G: nx.Graph) -> Dict[str, float]:
+    total_casos = int(df_filtered["n_dist_ID_DGC"].sum())
+
+    df_upper = df_filtered.copy()
+    df_upper["TIPO_UP"] = df_upper["TIPO"].str.upper().str.strip()
+    df_upper["SUB_TIPO_UP"] = df_upper["SUB_TIPO"].str.upper().str.strip()
+
+    extorsion = int(df_upper[df_upper["TIPO_UP"] == "EXTORSION"]["n_dist_ID_DGC"].sum())
+    sicariato = int(df_upper[(df_upper["SUB_TIPO_UP"] == "SICARIATO") | (df_upper["TIPO_UP"] == "HOMICIDIO")]["n_dist_ID_DGC"].sum())
+
+    densidad = float(nx.density(G)) if G.number_of_nodes() > 1 else 0.0
+    grados = [d for _, d in G.degree()]
+    grado_promedio = float(np.mean(grados)) if grados else 0.0
+
+    return {
+        "nodos": G.number_of_nodes(),
+        "aristas": G.number_of_edges(),
+        "casos_totales": total_casos,
+        "extorsion": extorsion,
+        "sicariato": sicariato,
+        "densidad": densidad,
+        "grado_promedio": grado_promedio,
+    }
+
+def generar_grafo_territorial(df, gdf, department, crime_type, year, color_mode="cases", abrir_archivo=False):
+    if not department:
+        raise ValueError("Selecciona un departamento válido.")
+
+    df_filtered = filtrar_dataframe(df, department, crime_type, year)
+    if df_filtered.empty:
+        raise ValueError("No se encontraron registros para los filtros elegidos.")
+
+    df_counts, df_subtypes = obtener_conteos(df_filtered)
+
+    dep_upper = department.upper().strip()
+    gdf_dep = gdf[gdf["NOMBDEP"].str.upper().str.strip() == dep_upper]
+    if gdf_dep.empty:
+        raise ValueError(f"No hay geometrías para el departamento '{department}'.")
+
+    G = construir_grafo(gdf_dep)
+    if G.number_of_nodes() == 0:
+        raise ValueError("El grafo no tiene nodos para los filtros seleccionados.")
+
+    G = asignar_atributos_grafo(G, df_counts, df_subtypes)
+    df_centrality = calcular_centralidad(G, df_counts)
+    df_centrality, thresholds = categorizar_distritos(df_centrality)
+
+    image_path = graficar_grafo_graphviz(G, df_centrality, department, color_mode=color_mode, abrir_archivo=abrir_archivo)
+    legend = construir_leyenda(color_mode, thresholds)
+    stats = resumir_estadisticas(df_filtered, G)
+
+    descripcion = f"{stats['nodos']} distritos | {stats['aristas']} conexiones territoriales"
+
+    return {
+        "image_path": image_path,
+        "graph": G,
+        "centralidad": df_centrality,
+        "stats": stats,
+        "legend": legend,
+        "graph_title": f"Grafo de Distritos - {department.title()}",
+        "graph_subtitle": descripcion,
+        "color_mode": color_mode,
+        "thresholds": thresholds,
+    }
 
 def consultar_distrito(G, df_centrality):
     
@@ -358,24 +498,22 @@ def consultar_distrito(G, df_centrality):
 
 def mostrar_explorar_grafo(df, gdf):
     department, crime_type, year = pedir_parametros_usuario(df)
-    df_filtered = filtrar_dataframe(df, department, crime_type, year)
-    df_counts, df_subtypes = obtener_conteos(df_filtered)
-    
-    # Filtrado robusto del GeoDataFrame
-    dep_upper = department.upper().strip()
-    gdf_dep = gdf[gdf["NOMBDEP"].str.upper().str.strip() == dep_upper]
-    
-    if gdf_dep.empty:
-        print(f"❌ ERROR: No se encontraron datos geográficos para el departamento '{department}'.")
+    try:
+        resultado = generar_grafo_territorial(
+            df,
+            gdf,
+            department,
+            crime_type,
+            year,
+            color_mode="cases",
+            abrir_archivo=True,
+        )
+    except ValueError as exc:
+        print(f"❌ {exc}")
         return
 
-    G = construir_grafo(gdf_dep)
-    G = asignar_atributos_grafo(G, df_counts, df_subtypes)
-    
-    # Cálculo y Categorización (esencial para los colores)
-    df_centrality = calcular_centralidad(G, df_counts)
-    df_centrality = categorizar_distritos(df_centrality)
-    
+    G = resultado["graph"]
+    df_centrality = resultado["centralidad"]
+
     imprimir_estadisticas_grafo(G)
-    graficar_grafo_graphviz(G, df_centrality, department)
     consultar_distrito(G, df_centrality)
