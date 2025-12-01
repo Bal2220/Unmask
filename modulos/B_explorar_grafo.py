@@ -335,8 +335,7 @@ def graficar_grafo_matplotlib(
 ):
     """Renderiza el grafo usando NetworkX + Matplotlib como fallback local."""
     plt.ioff()
-    # 620x240 target aspect ratio (~2.58) so the thumbnail fills the GUI slot
-    fig, ax = plt.subplots(figsize=(15.5, 6.0), dpi=160)
+    fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
     fig.patch.set_facecolor("#FFFFFF")
     ax.set_facecolor("#FFFFFF")
 
@@ -473,11 +472,11 @@ def graficar_grafo_matplotlib(
 
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.05, 1.05)
-    ax.set_position([0.02, 0.08, 0.96, 0.84])
     ax.axis("off")
+    plt.tight_layout()
 
     output_path = os.path.join(output_dir, f"{base_name}_matplotlib.png")
-    plt.savefig(output_path, facecolor=fig.get_facecolor(), pad_inches=0.1)
+    plt.savefig(output_path, bbox_inches='tight', facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"[i] Grafo renderizado con Matplotlib en: {output_path}")
     return output_path
@@ -496,8 +495,7 @@ def _render_graphviz_estilo_original(
         engine="neato",
         format="png",
         graph_attr={
-            "size": "12,4.65!",
-            "ratio": "fill",
+            "size": "12,10",
             "overlap": "false",
             "splines": "true",
             "ranksep": "1.5",

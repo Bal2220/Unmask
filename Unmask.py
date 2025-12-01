@@ -1,8 +1,10 @@
 # Unmask.py  (GUI principal)
 
 import tkinter as tk
-from tkinter import Canvas, Entry, messagebox, ttk
+from tkinter import Canvas, Entry, messagebox, ttk, scrolledtext
 from datetime import datetime
+
+import os
 
 import pandas as pd
 import geopandas as gpd
@@ -170,11 +172,7 @@ def dashboard(usuario):
         elif nombre == "Grafo Territorial":
             cargar_grafo_territorial()
         elif nombre == "Algoritmos":
-            messagebox.showinfo(
-                "Algoritmos",
-                "El módulo de algoritmos avanzados se ejecuta por consola.\n\n"
-                "Puedes seguir usando main.py para eso."
-            )
+            cargar_algoritmos()
         elif nombre == "Resultados":
             messagebox.showinfo(
                 "Resultados",
@@ -375,7 +373,7 @@ def dashboard(usuario):
         limpiar()
 
         vista = tk.Frame(contenido, bg="#eef2f6", width=ANCHO-250, height=ALTO-90)
-        vista.pack(fill="both", expand=True)
+        vista.place(x=0, y=0, width=ANCHO-250, height=ALTO-90)
 
         opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
 
@@ -669,6 +667,618 @@ def dashboard(usuario):
         btn_generar.config(command=render_grafo)
         actualizar_leyenda([])
         actualizar_stats(None)
+
+    def cargar_algoritmos():
+        limpiar()
+
+        contenedor_scroll = tk.Frame(contenido, bg="#eef2f6", width=ANCHO-250, height=ALTO-90)
+        contenedor_scroll.place(x=0, y=0, relwidth=1, relheight=1)
+
+        canvas = tk.Canvas(contenedor_scroll, bg="#eef2f6", highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(contenedor_scroll, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        vista_base = tk.Frame(canvas, bg="#eef2f6")
+        vista_id = canvas.create_window((0, 0), window=vista_base, anchor="nw")
+
+        def _actualizar_scroll_alg(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _ajustar_ancho_alg(event):
+            canvas.itemconfig(vista_id, width=event.width)
+
+        vista_base.bind("<Configure>", _actualizar_scroll_alg)
+        canvas.bind("<Configure>", _ajustar_ancho_alg)
+
+        vista = tk.Frame(vista_base, bg="#eef2f6")
+        vista.pack(fill="both", expand=True, padx=25, pady=15)
+
+        opciones = B_explorar_grafo.obtener_opciones_filtros(DF_SIDPOL)
+        departamentos = opciones.get("departamentos", [])
+        tipo_opciones = opciones.get("tipo_delito", B_explorar_grafo.TIPO_DELITO_OPCIONES)
+        tipo_map = {opt["label"]: opt["value"] for opt in tipo_opciones}
+
+        depto_var = tk.StringVar(value=departamentos[0] if departamentos else "")
+        tipo_var = tk.StringVar(value=tipo_opciones[0]["label"] if tipo_opciones else "Todos")
+        estado_var = tk.StringVar(value="Selecciona filtros y ejecuta un algoritmo.")
+
+        filtros = tk.Frame(vista, bg="#081629", height=120)
+        filtros.pack(fill="x", padx=25, pady=(20, 0))
+        for col in range(5):
+            filtros.columnconfigure(col, weight=1)
+
+        estilo = ttk.Style()
+        try:
+            estilo.theme_use("default")
+        except Exception:
+            pass
+        estilo.configure(
+            "Alg.TCombobox",
+            fieldbackground="#142541",
+            background="#142541",
+            foreground="white",
+            borderwidth=0,
+            relief="flat",
+        )
+        estilo.map(
+            "Alg.TCombobox",
+            fieldbackground=[("readonly", "#142541")],
+            foreground=[("readonly", "white")],
+        )
+
+        def crear_selector(texto, columna, variable, valores, combo_width=0):
+            tk.Label(
+                filtros,
+                text=texto,
+                bg="#081629",
+                fg="#7DA3C9",
+                font=("Segoe UI", 10, "bold"),
+            ).grid(row=0, column=columna, padx=12, pady=(15, 2), sticky="w")
+
+            combo = ttk.Combobox(
+                filtros,
+                textvariable=variable,
+                values=valores,
+                state="readonly",
+                style="Alg.TCombobox",
+                width=combo_width or 0,
+            )
+            combo.grid(row=1, column=columna, padx=12, pady=(0, 15), sticky="ew")
+            if not valores:
+                combo.configure(state="disabled")
+            return combo
+
+        depto_combo = crear_selector("Departamento", 0, depto_var, departamentos)
+        crear_selector("Tipo de delito", 1, tipo_var, [opt["label"] for opt in tipo_opciones])
+
+        tabs_frame = tk.Frame(vista, bg="#eef2f6")
+        tabs_frame.pack(fill="x", padx=25, pady=(20, 10))
+
+        tab_names = ["BFS/DFS", "Floyd-Warshall", "Kruskal (MST)"]
+        selected_tab = tk.StringVar(value=tab_names[0])
+        tab_buttons = {}
+
+        def estilo_tab(activo):
+            return {
+                "bg": "#111C2E" if activo else "#ced6e0",
+                "fg": "white" if activo else "#1E3A5F",
+            }
+
+        def cambiar_tab(nombre):
+            selected_tab.set(nombre)
+            for tab, boton in tab_buttons.items():
+                style = estilo_tab(tab == nombre)
+                boton.config(bg=style["bg"], fg=style["fg"])
+            for frame in tab_control_frames.values():
+                frame.grid_remove()
+            frame = tab_control_frames.get(nombre)
+            if frame:
+                frame.grid(row=0, column=0, sticky="nsew")
+            btn_ejecutar.config(text=f"Ejecutar {nombre}")
+            estado_var.set("Configura los parámetros y ejecuta el algoritmo seleccionado.")
+
+        for idx, nombre in enumerate(tab_names):
+            style = estilo_tab(idx == 0)
+            b = tk.Label(
+                tabs_frame,
+                text=nombre,
+                bg=style["bg"],
+                fg=style["fg"],
+                font=("Segoe UI", 11, "bold"),
+                width=16,
+                pady=8,
+                cursor="hand2",
+            )
+            b.grid(row=0, column=idx, padx=4)
+            tab_buttons[nombre] = b
+            b.bind("<Button-1>", lambda e, n=nombre: cambiar_tab(n))
+
+        controles = tk.Frame(vista, bg="#eef2f6")
+        controles.pack(fill="x", padx=25, pady=(0, 20))
+        controles.columnconfigure(0, weight=1)
+        tab_control_frames = {}
+
+        # --- Controles BFS / DFS ---
+        frame_bfs = tk.Frame(controles, bg="#eef2f6")
+        tab_control_frames["BFS/DFS"] = frame_bfs
+        frame_bfs.grid(row=0, column=0, sticky="ew")
+
+        metodo_var = tk.StringVar(value="BFS (Por niveles)")
+        metodo_map = {
+            "BFS (Por niveles)": "bfs",
+            "DFS (En profundidad)": "dfs",
+        }
+        tk.Label(
+            frame_bfs,
+            text="Algoritmo",
+            bg="#eef2f6",
+            fg="#1E3A5F",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=5)
+        metodo_combo = ttk.Combobox(
+            frame_bfs,
+            textvariable=metodo_var,
+            values=list(metodo_map.keys()),
+            state="readonly",
+            style="Alg.TCombobox",
+            width=25,
+        )
+        metodo_combo.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
+        distrito_var = tk.StringVar()
+        tk.Label(
+            frame_bfs,
+            text="Distrito inicial",
+            bg="#eef2f6",
+            fg="#1E3A5F",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=5)
+        distrito_combo = ttk.Combobox(
+            frame_bfs,
+            textvariable=distrito_var,
+            values=[],
+            state="readonly",
+            style="Alg.TCombobox",
+            width=30,
+        )
+        distrito_combo.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        # --- Controles Floyd ---
+        frame_floyd = tk.Frame(controles, bg="#eef2f6")
+        tab_control_frames["Floyd-Warshall"] = frame_floyd
+        frame_floyd.grid(row=0, column=0, sticky="ew")
+        frame_floyd.grid_remove()
+        modo_var = tk.StringVar(value="Mayor concentración")
+        modo_map = {
+            "Mayor concentración": "volume",
+            "Ruta eficiente": "efficiency",
+        }
+        tk.Label(
+            frame_floyd,
+            text="Modo de análisis",
+            bg="#eef2f6",
+            fg="#1E3A5F",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=5)
+        modo_combo = ttk.Combobox(
+            frame_floyd,
+            textvariable=modo_var,
+            values=list(modo_map.keys()),
+            state="readonly",
+            style="Alg.TCombobox",
+            width=28,
+        )
+        modo_combo.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
+        # --- Controles Kruskal ---
+        frame_kruskal = tk.Frame(controles, bg="#eef2f6")
+        tab_control_frames["Kruskal (MST)"] = frame_kruskal
+        frame_kruskal.grid(row=0, column=0, sticky="ew")
+        frame_kruskal.grid_remove()
+        tk.Label(
+            frame_kruskal,
+            text="Top K nodos prioritarios (opcional)",
+            bg="#eef2f6",
+            fg="#1E3A5F",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=5)
+        k_var = tk.StringVar()
+        tk.Entry(frame_kruskal, textvariable=k_var, width=10, font=("Segoe UI", 11)).grid(
+            row=1, column=0, padx=5, pady=5, sticky="w"
+        )
+
+        btn_wrapper = tk.Frame(vista, bg="#eef2f6")
+        btn_wrapper.pack(fill="x", padx=25, pady=(0, 15))
+
+        btn_ejecutar = tk.Button(
+            btn_wrapper,
+            text="Ejecutar BFS/DFS",
+            bg="#12D0A5",
+            fg="#051427",
+            font=("Segoe UI", 12, "bold"),
+            relief="flat",
+            cursor="hand2",
+        )
+        btn_ejecutar.pack()
+
+        resultado = tk.Frame(vista, bg="#eef2f6")
+        resultado.pack(fill="both", expand=True, padx=25, pady=(0, 20))
+        resultado.columnconfigure(0, weight=3)
+        resultado.columnconfigure(1, weight=1)
+
+        grafico_card = tk.Frame(resultado, bg="white", height=360)
+        grafico_card.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+        grafico_card.grid_propagate(False)
+        tk.Label(
+            grafico_card,
+            text="Visualización del Grafo",
+            bg="white",
+            fg="#0A1B2E",
+            font=("Segoe UI", 15, "bold"),
+        ).place(x=20, y=15)
+
+        grafico_canvas = tk.Canvas(
+            grafico_card,
+            width=600,
+            height=260,
+            bg="#030914",
+            highlightthickness=0,
+        )
+        grafico_canvas.place(relx=0.5, y=60, anchor="n")
+        canvas_text_id = grafico_canvas.create_text(
+            300,
+            130,
+            text="Aún no hay imagen generada.",
+            fill="#94A3B8",
+            font=("Segoe UI", 11),
+            width=560,
+        )
+        canvas_state = {"image_id": None}
+
+        estado_label = tk.Label(
+            grafico_card,
+            textvariable=estado_var,
+            bg="white",
+            fg="#64748B",
+            font=("Segoe UI", 10, "italic"),
+        )
+        estado_label.place(x=20, y=330)
+
+        stats_card = tk.Frame(resultado, bg="#112744", height=360)
+        stats_card.grid(row=0, column=1, sticky="nsew")
+        stats_card.grid_propagate(False)
+        tk.Label(
+            stats_card,
+            text="Análisis Completado",
+            bg="#112744",
+            fg="white",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=15, pady=(15, 10))
+
+        stats_cards = []
+        for _ in range(4):
+            card = tk.Frame(stats_card, bg="#0B1C32", height=60)
+            card.pack(fill="x", padx=15, pady=6)
+            title = tk.Label(card, text="--", bg="#0B1C32", fg="#7DA3C9", font=("Segoe UI", 9))
+            title.pack(anchor="w")
+            value = tk.Label(card, text="--", bg="#0B1C32", fg="#F8FAFC", font=("Segoe UI", 15, "bold"))
+            value.pack(anchor="w")
+            stats_cards.append({"title": title, "value": value})
+
+        detalle_frame = tk.Frame(vista, bg="#eef2f6")
+        detalle_frame.pack(fill="both", expand=True, padx=25, pady=(0, 20))
+        detalle_frame.columnconfigure(0, weight=1)
+        detalle_frame.columnconfigure(1, weight=1)
+
+        detalle_izq = tk.Frame(detalle_frame, bg="white", height=220)
+        detalle_der = tk.Frame(detalle_frame, bg="white", height=220)
+        detalle_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        detalle_der.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        detalle_izq.grid_propagate(False)
+        detalle_der.grid_propagate(False)
+
+        titulo_izq = tk.Label(
+            detalle_izq,
+            text="Detalle Izquierdo",
+            bg="white",
+            fg="#0A1B2E",
+            font=("Segoe UI", 12, "bold"),
+        )
+        titulo_izq.pack(anchor="w", padx=15, pady=(15, 8))
+        cuerpo_izq = scrolledtext.ScrolledText(
+            detalle_izq,
+            wrap="word",
+            height=8,
+            font=("Segoe UI", 10),
+            bg="white",
+            fg="#1F2937",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        cuerpo_izq.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        cuerpo_izq.config(state="disabled")
+
+        titulo_der = tk.Label(
+            detalle_der,
+            text="Detalle Derecho",
+            bg="white",
+            fg="#0A1B2E",
+            font=("Segoe UI", 12, "bold"),
+        )
+        titulo_der.pack(anchor="w", padx=15, pady=(15, 8))
+        cuerpo_der = scrolledtext.ScrolledText(
+            detalle_der,
+            wrap="word",
+            height=8,
+            font=("Segoe UI", 10),
+            bg="white",
+            fg="#1F2937",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        cuerpo_der.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        cuerpo_der.config(state="disabled")
+
+        imagen_cache = {"photo": None}
+
+        def mostrar_mensaje_canvas(texto):
+            if canvas_state["image_id"]:
+                grafico_canvas.delete(canvas_state["image_id"])
+                canvas_state["image_id"] = None
+            grafico_canvas.itemconfig(canvas_text_id, text=texto, state="normal")
+
+        def set_text(widget, contenido):
+            widget.config(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", contenido or "Sin información disponible.")
+            widget.config(state="disabled")
+
+        def actualizar_imagen(ruta):
+            if not ruta or not os.path.exists(ruta):
+                imagen_cache["photo"] = None
+                mostrar_mensaje_canvas("No se generó imagen.")
+                return
+            try:
+                img = Image.open(ruta)
+                img.thumbnail((600, 260), Image.Resampling.LANCZOS)
+                imagen_cache["photo"] = ImageTk.PhotoImage(img)
+                if canvas_state["image_id"]:
+                    grafico_canvas.delete(canvas_state["image_id"])
+                canvas_state["image_id"] = grafico_canvas.create_image(
+                    300,
+                    130,
+                    image=imagen_cache["photo"],
+                )
+                grafico_canvas.itemconfig(canvas_text_id, state="hidden")
+            except Exception as exc:
+                imagen_cache["photo"] = None
+                mostrar_mensaje_canvas(f"Error al cargar imagen: {exc}")
+
+        def actualizar_stats(pares):
+            for idx, card in enumerate(stats_cards):
+                if idx < len(pares):
+                    titulo, valor = pares[idx]
+                    card["title"].config(text=titulo)
+                    card["value"].config(text=valor)
+                else:
+                    card["title"].config(text="--")
+                    card["value"].config(text="--")
+
+        def actualizar_detalles(titulo_left, cuerpo_left, titulo_right, cuerpo_right):
+            titulo_izq.config(text=titulo_left)
+            set_text(cuerpo_izq, cuerpo_left)
+            titulo_der.config(text=titulo_right)
+            set_text(cuerpo_der, cuerpo_right)
+
+        def obtener_distritos(dep):
+            if not dep:
+                return []
+            dep_upper = dep.upper().strip()
+            mask = GDF_GEO["NOMBDEP"].str.upper().str.strip() == dep_upper
+            distritos = sorted(GDF_GEO.loc[mask, "NOMBDIST"].dropna().unique())
+            return distritos
+
+        def refrescar_distritos(*_):
+            distritos = obtener_distritos(depto_var.get())
+            distrito_combo["values"] = distritos
+            if distritos:
+                distrito_var.set(distritos[0])
+            else:
+                distrito_var.set("")
+
+        refrescar_distritos()
+        depto_var.trace_add("write", lambda *_: refrescar_distritos())
+
+        def formatear_niveles(levels, frontera):
+            if not levels:
+                return "No se detectaron niveles."
+            lines = []
+            for item in levels:
+                nodos = ", ".join(item.get("nodes", [])) or "--"
+                lines.append(f"Nivel {item.get('level', 0)}: {nodos} ({item.get('cases', 0)} casos)")
+            if frontera:
+                lines.append("")
+                lines.append(f"Frontera vigente: {', '.join(frontera)}")
+            return "\n".join(lines)
+
+        def formatear_clusters(clusters):
+            if not clusters:
+                return "No se detectaron agrupaciones críticas."
+            return "\n".join(
+                f"{c['name']}: {c['cases']} casos · {c['connections']} conexiones · {', '.join(c['nodes'])}" for c in clusters
+            )
+
+        def formatear_rutas(rutas, limite=5):
+            if not rutas:
+                return "No se encontraron rutas."
+            lines = []
+            for idx, ruta in enumerate(rutas[:limite], start=1):
+                camino = " -> ".join(ruta.get("path", []))
+                lines.append(f"Ruta {idx}: {camino} ({ruta.get('concentration', 0)} casos)")
+            return "\n".join(lines)
+
+        def formatear_puentes(bridge_report):
+            if not bridge_report:
+                return "No se identificaron distritos puente."
+            return "\n".join(
+                f"{item.get('Distrito')}: {item.get('Frecuencia en Rutas')} apariciones" for item in bridge_report
+            )
+
+        def formatear_nodos_criticos(nodes):
+            if not nodes:
+                return "Sin nodos críticos registrados."
+            return "\n".join(f"{n.get('distrito')}: {n.get('casos')} casos" for n in nodes)
+
+        def formatear_columna(columna):
+            if not columna:
+                return "Sin enlaces destacados."
+            return "\n".join(
+                f"{c.get('Enlace')}: {c.get('Casos Acumulados')} casos (Costo {c.get('Costo (MST)')})" for c in columna
+            )
+
+        def ejecutar_algoritmo():
+            departamento = depto_var.get().strip()
+            if not departamento:
+                estado_var.set("Selecciona un departamento válido.")
+                return
+
+            crime_value = tipo_map.get(tipo_var.get(), "TODO")
+            try:
+                G, crime_types = B_algoritmos.preparar_grafo_para_algoritmos(
+                    DF_SIDPOL,
+                    GDF_GEO,
+                    departamento,
+                    crime_value,
+                    verbose=False,
+                )
+            except Exception as exc:
+                estado_var.set(f"Error al preparar grafo: {exc}")
+                return
+
+            if not G or not G.nodes:
+                estado_var.set("El grafo está vacío para los filtros seleccionados.")
+                actualizar_imagen(None)
+                actualizar_stats([])
+                actualizar_detalles("Detalle", "Sin datos", "Detalle", "Sin datos")
+                return
+
+            tab = selected_tab.get()
+
+            try:
+                if tab == "BFS/DFS":
+                    nodo_inicio = distrito_var.get().strip()
+                    if not nodo_inicio:
+                        estado_var.set("Selecciona un distrito inicial.")
+                        return
+                    if nodo_inicio not in G.nodes:
+                        estado_var.set("El distrito inicial no tiene datos para este filtro.")
+                        return
+                    metodo_value = metodo_map.get(metodo_var.get(), "bfs")
+                    resultado = B_algoritmos.expansion_tree(
+                        G,
+                        nodo_inicio,
+                        metodo_value,
+                        None,
+                        crime_types,
+                        departamento,
+                        show_plot=False,
+                        verbose=False,
+                    )
+                    if not resultado:
+                        estado_var.set("No se pudo generar el árbol de expansión.")
+                        return
+
+                    stats = resultado.get("stats", {})
+                    actualizar_stats([
+                        ("Algoritmo", stats.get("algoritmo", "--")),
+                        ("Nodos alcanzados", stats.get("nodos_alcanzados_pct", "--")),
+                        ("Casos acumulados", str(stats.get("casos_acumulados_ruta", "--"))),
+                        ("Profundidad", str(stats.get("profundidad_maxima", "--"))),
+                    ])
+
+                    actualizar_imagen(resultado.get("image_path"))
+                    actualizar_detalles(
+                        "Árbol de Expansión por Niveles",
+                        formatear_niveles(resultado.get("levels", []), resultado.get("frontier_nodes", [])),
+                        "Agrupaciones Delictivas Detectadas",
+                        formatear_clusters(resultado.get("clusters", [])),
+                    )
+                    estado_var.set("Árbol de expansión generado correctamente.")
+
+                elif tab == "Floyd-Warshall":
+                    modo_value = modo_map.get(modo_var.get(), "volume")
+                    resultado = B_algoritmos.floyd_warshall_routes(
+                        G,
+                        crime_types,
+                        modo_value,
+                        departamento,
+                        show_plot=False,
+                        verbose=False,
+                    )
+                    if not resultado:
+                        estado_var.set("No se pudieron calcular rutas críticas.")
+                        return
+
+                    stats = resultado.get("stats", {})
+                    actualizar_stats([
+                        ("Caminos calculados", str(stats.get("num_caminos_calculados", "--"))),
+                        ("Distritos puente", str(stats.get("num_distritos_puentes", "--"))),
+                        ("Máx. concentración", str(stats.get("mayor_concentracion_casos", "--"))),
+                        ("Ruta eficiente", str(stats.get("ruta_mas_eficiente_casos", "--"))),
+                    ])
+
+                    actualizar_imagen(resultado.get("image_path"))
+                    actualizar_detalles(
+                        "Rutas Críticas Identificadas",
+                        formatear_rutas(resultado.get("critical_paths", [])),
+                        "Distritos Puente Estratégicos",
+                        formatear_puentes(resultado.get("bridge_report", [])),
+                    )
+                    estado_var.set("Rutas críticas analizadas con éxito.")
+
+                else:  # Kruskal
+                    k_value = k_var.get().strip()
+                    k_num = int(k_value) if k_value.isdigit() else None
+                    resultado = B_algoritmos.kruskal_mst_analysis(
+                        G,
+                        k_num,
+                        crime_types,
+                        departamento,
+                        show_plot=False,
+                        verbose=False,
+                    )
+                    if not resultado:
+                        estado_var.set("No se pudo calcular el MST.")
+                        return
+
+                    stats = resultado.get("stats", {})
+                    actualizar_stats([
+                        ("Aristas en MST", str(stats.get("MST_aristas", "--"))),
+                        ("Aristas eliminadas", str(stats.get("aristas_eliminadas", "--"))),
+                        ("Reducción de peso", f"{stats.get('reduccion_peso_pct', 0):.2f}%" if stats.get('reduccion_peso_pct') is not None else "--"),
+                        ("Focos detectados", str(stats.get("focos_del_crimen_detectados", "--"))),
+                    ])
+
+                    actualizar_imagen(resultado.get("image_path"))
+                    actualizar_detalles(
+                        "Nodos Críticos",
+                        formatear_nodos_criticos(resultado.get("critical_nodes", [])),
+                        "Columna Central (Enlaces)",
+                        formatear_columna(resultado.get("central_column", [])),
+                    )
+                    estado_var.set("Red mínima optimizada con Kruskal.")
+
+            except Exception as exc:
+                estado_var.set(f"Error al ejecutar {tab}: {exc}")
+
+        btn_ejecutar.config(command=ejecutar_algoritmo)
+        cambiar_tab(selected_tab.get())
 
     # Footer usuario
     tk.Frame(panel, bg="#0F2238", height=60, width=250).place(x=0, y=ALTO-60)

@@ -42,10 +42,18 @@ def _filter_subgraph(G: nx.Graph, department: Optional[str]) -> nx.Graph:
     return G.subgraph(nodes_to_keep).copy()
 
 
-def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department: str, crime_types: List[str]) -> nx.Graph:
+def _create_graph_from_data(
+    df: pd.DataFrame,
+    gdf: gpd.GeoDataFrame,
+    department: str,
+    crime_types: List[str],
+    verbose: bool = True,
+) -> nx.Graph:
     """
     Crea un grafo NetworkX a partir de los datos filtrados y geoespaciales.
     """
+
+    log = print if verbose else (lambda *args, **kwargs: None)
     
     # 1. Filtrar los datos por el departamento
     df_dep = df[df["DPTO_HECHO_NEW"].str.upper().str.strip() == department.upper().strip()]
@@ -66,12 +74,12 @@ def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department:
     
     # Verificar si el conteo sigue siendo cero (esto es una buena práctica)
     if df_counts["Crime_Count"].sum() == 0 and not df_counts.empty:
-        print("\n======================== ⚠️ ALERTA DE DATOS ⚠️ ========================")
-        print("El conteo total de crímenes para este filtro es CERO. Revisar el filtro 'DIST_HECHO'.")
-        print("Esto causará un grafo con pesos nulos.")
-        print("======================================================================")
+        log("\n======================== ⚠️ ALERTA DE DATOS ⚠️ ========================")
+        log("El conteo total de crímenes para este filtro es CERO. Revisar el filtro 'DIST_HECHO'.")
+        log("Esto causará un grafo con pesos nulos.")
+        log("======================================================================")
     elif df_counts.empty:
-        print(f"Advertencia: El DataFrame de conteos está vacío para {department}.")
+        log(f"Advertencia: El DataFrame de conteos está vacío para {department}.")
         
     # --- FIN DE LA VERIFICACIÓN DEL CONTEO ---
     df_subtypes = df_dep.groupby(["DIST_HECHO", "SUB_TIPO"]).size().reset_index(name="Subtype_Crime_Count")
@@ -80,14 +88,14 @@ def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department:
     gdf_dep = gdf[gdf["NOMBDEP"].str.upper().str.strip() == department.upper().strip()]
     
     if gdf_dep.empty:
-        print(f"Error: No se encontraron datos geográficos para {department}.")
+        log(f"Error: No se encontraron datos geográficos para {department}.")
         return nx.Graph()
 
     gdf_dep = gdf_dep[gdf_dep.geometry.notna()]
 
 
     if gdf_dep.empty:
-        print(f"Error: No quedan distritos con geometría válida para {department} después de la limpieza.")
+        log(f"Error: No quedan distritos con geometría válida para {department} después de la limpieza.")
         return nx.Graph()
 
     # 4. Construir el Grafo
@@ -106,18 +114,15 @@ def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department:
         distrito = row["NOMBDIST"]
         distrito_norm = distrito.upper().strip()
 
-    # 🚨 TEMPORAL: Verifica la existencia del distrito en los datos de delitos
-    if distrito_norm not in crime_map:
+        if distrito_norm not in crime_map:
+            log(f"DEBUG: El distrito '{distrito}' (de GEO) NO tiene casos mapeados.")
+            continue
 
-        print(f"DEBUG: El distrito '{distrito}' (de GEO) NO tiene casos mapeados.")
-    else:
-        # Esto te dirá si se cargó un caso (debería ser > 0)
-        print(f"DEBUG: El distrito '{distrito}' tiene casos mapeados: {crime_map.get(distrito_norm, 0)}")
-        
+        log(f"DEBUG: El distrito '{distrito}' tiene casos mapeados: {crime_map.get(distrito_norm, 0)}")
+
         try:
-            # Centroide (usado para la posición)
-            centroid = row.geometry.centroid # Ya validado con .notna() arriba, pero Try-Except es buena práctica.
-            
+            centroid = row.geometry.centroid
+
             G.add_node(
                 distrito,
                 department=department.upper().strip(),
@@ -126,8 +131,7 @@ def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department:
                 pos=(centroid.x, centroid.y)
             )
         except Exception as e:
-            # Si aún falla, se imprime el distrito para debugging
-            print(f"Advertencia: No se pudo procesar la geometría para el distrito {distrito}: {e}")
+            log(f"Advertencia: No se pudo procesar la geometría para el distrito {distrito}: {e}")
             
 
     # Agregar aristas por contigüidad
@@ -157,22 +161,54 @@ def _create_graph_from_data(df: pd.DataFrame, gdf: gpd.GeoDataFrame, department:
         for node in G.nodes():
             G.nodes[node]['cases_total'] = _get_case_count(G, node, crime_types)
             
-    print(f"Grafo base creado: {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas.")
+    log(f"Grafo base creado: {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas.")
     return G
 
 
-def draw_analysis_graph(G, pos, title: str, subtitle: str, node_colors, edge_colors, node_labels, 
-    stats: Dict, output_filename: str, legend: Dict[str, str]):
-    """Visualización estática con Matplotlib, leyenda, zoom y guardado de resultados."""
-    
-    # --- 1. Ajuste de Posición ---
-    if not pos:
-        # Usar el layout de resorte si no hay posiciones geográficas
-        pos = nx.spring_layout(G, k=0.5, iterations=50) # 'k' y 'iterations' ayudan a separar nodos
+def preparar_grafo_para_algoritmos(
+    df: pd.DataFrame,
+    gdf: gpd.GeoDataFrame,
+    department: str,
+    crime_filter,
+    verbose: bool = False,
+) -> Tuple[nx.Graph, List[str]]:
+    """Normaliza filtros y devuelve el grafo listo para los algoritmos."""
 
-    # --- 2. Crear Figura ---
-    plt.figure(figsize=(16, 12))
-    ax = plt.gca()
+    if isinstance(crime_filter, (list, tuple, set)):
+        crime_types = [str(c).upper().strip() for c in crime_filter if c]
+    else:
+        valor = str(crime_filter or "TODO").upper().strip()
+        crime_types = [valor]
+
+    if not crime_types:
+        crime_types = ["TODO"]
+
+    if any(ct in {"TODO", "TODOS"} for ct in crime_types):
+        crime_types = ["TODO"]
+
+    G = _create_graph_from_data(df, gdf, department, crime_types, verbose=verbose)
+    return G, crime_types
+
+
+def draw_analysis_graph(
+    G,
+    pos,
+    title: str,
+    subtitle: str,
+    node_colors,
+    edge_colors,
+    node_labels,
+    stats: Dict,
+    output_filename: str,
+    legend: Dict[str, str],
+    show_plot: bool = True,
+):
+    """Renderiza y guarda la figura del algoritmo; opcionalmente evita bloquear la GUI."""
+
+    if not pos:
+        pos = nx.spring_layout(G, k=0.5, iterations=50)
+
+    fig, ax = plt.subplots(figsize=(16, 12))
     
     nx.draw(
         G, pos,
@@ -213,22 +249,36 @@ def draw_analysis_graph(G, pos, title: str, subtitle: str, node_colors, edge_col
     output_dir = "resultados_algoritmos"
     os.makedirs(output_dir, exist_ok=True)
     full_path = os.path.join(output_dir, output_filename)
-    plt.savefig(full_path, bbox_inches='tight')
+    fig.savefig(full_path, bbox_inches='tight')
     print(f"[✓] Visualización guardada en: {full_path}")
-    
-    # Muestra la ventana interactiva con zoom, pan y posibilidad de guardar
-    plt.show()
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return full_path
 
 # --------------------------------------------------------------------------
 # --- 2. Análisis BFS / DFS ---
 # --------------------------------------------------------------------------
 
-def expansion_tree(G: nx.Graph, inicio: str, method: str = 'bfs', max_depth: Optional[int] = None, 
-    crime_types: Optional[List[str]] = None, department: Optional[str] = None) -> Dict:
+def expansion_tree(
+    G: nx.Graph,
+    inicio: str,
+    method: str = 'bfs',
+    max_depth: Optional[int] = None,
+    crime_types: Optional[List[str]] = None,
+    department: Optional[str] = None,
+    show_plot: bool = True,
+    verbose: bool = True,
+) -> Dict:
     
+    log = print if verbose else (lambda *args, **kwargs: None)
+
     G_filtered = _filter_subgraph(G, department)
     if inicio not in G_filtered:
-        print(f"Error: El nodo inicial '{inicio}' no se encuentra en el subgrafo filtrado.")
+        log(f"Error: El nodo inicial '{inicio}' no se encuentra en el subgrafo filtrado.")
         return {}
 
     # 1. Generar el árbol de expansión (Dirigido)
@@ -346,66 +396,119 @@ def expansion_tree(G: nx.Graph, inicio: str, method: str = 'bfs', max_depth: Opt
         }
     }
 
-    draw_analysis_graph(G_filtered, pos, 
-        "ÁRBOL DE EXPANSIÓN TERRITORIAL DEL DELITO", 
-        f"Análisis {algoritmo} desde {inicio}", node_colors, edge_colors, labels, stats, f"expansion_{method}_{inicio}.png", legend)
+    image_path = draw_analysis_graph(
+        G_filtered,
+        pos,
+        "ÁRBOL DE EXPANSIÓN TERRITORIAL DEL DELITO",
+        f"Análisis {algoritmo} desde {inicio}",
+        node_colors,
+        edge_colors,
+        labels,
+        stats,
+        f"expansion_{method}_{inicio}.png",
+        legend,
+        show_plot=show_plot,
+    )
     
     # 4. Reporte detallado (Impresión en consola - REESTRUCTURADO EN 4 PARTES)
     
-    print("\n==================== REPORTE DE ANÁLISIS BFS/DFS ====================")
+    log("\n==================== REPORTE DE ANÁLISIS BFS/DFS ====================")
     
     # PARTE 1: Análisis Completado (Métricas Clave)
-    print("\n[ PARTE 1: ANÁLISIS COMPLETADO (MÉTRICAS CLAVE) 📈 ]")
-    print("-" * 60)
-    print(f"| {'Algoritmo Ejecutado':<25}: {stats['algoritmo']}")
-    print(f"| {'Nodo Inicial (Epicentro)':<25}: {stats['nodo_inicial']}")
-    print(f"| {'Profundidad Máxima Alcanzada':<25}: {stats['profundidad_maxima']} niveles")
-    print(f"| {'Nodos Alcanzados (%)':<25}: {stats['nodos_alcanzados_pct']}")
-    print(f"| {'Casos Acumulados en la Ruta':<25}: {stats['casos_acumulados_ruta']}")
-    print("-" * 60)
+    log("\n[ PARTE 1: ANÁLISIS COMPLETADO (MÉTRICAS CLAVE) 📈 ]")
+    log("-" * 60)
+    log(f"| {'Algoritmo Ejecutado':<25}: {stats['algoritmo']}")
+    log(f"| {'Nodo Inicial (Epicentro)':<25}: {stats['nodo_inicial']}")
+    log(f"| {'Profundidad Máxima Alcanzada':<25}: {stats['profundidad_maxima']} niveles")
+    log(f"| {'Nodos Alcanzados (%)':<25}: {stats['nodos_alcanzados_pct']}")
+    log(f"| {'Casos Acumulados en la Ruta':<25}: {stats['casos_acumulados_ruta']}")
+    log("-" * 60)
     
     # PARTE 2: Patrón de Expansión
-    print("\n[ PARTE 2: PATRÓN DE EXPANSIÓN DETECTADO 🧭 ]")
-    print(f"**Velocidad de Expansión:** {stats['velocidad_expansion_calc']}")
-    print(f"**Dirección Detectada:** {stats['direccion_detectada_calc']}")
+    log("\n[ PARTE 2: PATRÓN DE EXPANSIÓN DETECTADO 🧭 ]")
+    log(f"**Velocidad de Expansión:** {stats['velocidad_expansion_calc']}")
+    log(f"**Dirección Detectada:** {stats['direccion_detectada_calc']}")
     nodos_frontera = levels.get(max_level, [])
-    print(f"**Áreas de Avance (Frontera):** {' (Nivel ' + str(max_level) + ')' if max_level > 0 else ''} {', '.join(nodos_frontera)}")
+    log(f"**Áreas de Avance (Frontera):** {' (Nivel ' + str(max_level) + ')' if max_level > 0 else ''} {', '.join(nodos_frontera)}")
 
 
     # PARTE 3: Expansión por Niveles (Árbol)
-    print("\n[ PARTE 3: EXPANSIÓN POR NIVELES (ÁRBOL) 🌳 ]")
+    log("\n[ PARTE 3: EXPANSIÓN POR NIVELES (ÁRBOL) 🌳 ]")
     for nivel, nodos in sorted(levels.items()):
         casos_nivel = sum(_get_case_count(G_filtered, n, crime_types) for n in nodos)
-        print(f"Nivel {nivel} ({len(nodos)} nodos): Casos acumulados: {casos_nivel}. Nodos: {', '.join(nodos)}")
+        log(f"Nivel {nivel} ({len(nodos)} nodos): Casos acumulados: {casos_nivel}. Nodos: {', '.join(nodos)}")
     
     # PARTE 4: Agrupaciones Delictivas (Clusters)
-    print("\n[ PARTE 4: AGRUPACIONES DELICTIVAS (CLUSTERS DE FOCOS ROJOS) 🔥 ]")
+    log("\n[ PARTE 4: AGRUPACIONES DELICTIVAS (CLUSTERS DE FOCOS ROJOS) 🔥 ]")
+    cluster_details = []
     if hotspots:
         for i, cluster in enumerate(hotspots):
             casos_cluster = sum(_get_case_count(G_filtered, n, crime_types) for n in cluster)
             conexiones_internas = G_hot.subgraph(cluster).number_of_edges()
-            print(f"Cluster {i+1} ({len(cluster)} nodos): Casos={casos_cluster}. Conexiones Internas={conexiones_internas}. Nodos: {', '.join(cluster)}")
+            log(
+                f"Cluster {i+1} ({len(cluster)} nodos): Casos={casos_cluster}. Conexiones Internas={conexiones_internas}. Nodos: {', '.join(cluster)}"
+            )
+            cluster_details.append(
+                {
+                    "name": f"Cluster {i+1}",
+                    "nodes": cluster,
+                    "cases": int(casos_cluster),
+                    "connections": int(conexiones_internas),
+                }
+            )
     else:
-        print("No se detectaron clusters con alta concentración (> 75% cuartil).")
-    
-    print("\n==================== FIN DEL ANÁLISIS BFS/DFS ====================")
-    
-    return stats
+        log("No se detectaron clusters con alta concentración (> 75% cuartil).")
+
+    log("\n==================== FIN DEL ANÁLISIS BFS/DFS ====================")
+
+    levels_detail = []
+    for nivel, nodos in sorted(levels.items()):
+        levels_detail.append(
+            {
+                "level": int(nivel),
+                "nodes": nodos,
+                "cases": int(sum(_get_case_count(G_filtered, n, crime_types) for n in nodos)),
+            }
+        )
+
+    result = {
+        "stats": stats,
+        "levels": levels_detail,
+        "clusters": cluster_details,
+        "frontier_nodes": nodos_frontera,
+        "thresholds": {
+            "high": float(threshold_alta),
+            "medium": float(threshold_media),
+        },
+        "image_path": image_path,
+        "method": method.upper(),
+        "hotspots_raw": hotspots,
+    }
+
+    return result
 
 
 # --------------------------------------------------------------------------
 # --- 3. Análisis Floyd–Warshall (REPORTE DE 4 PARTES IMPLEMENTADO) ---
 # --------------------------------------------------------------------------
 
-def floyd_warshall_routes(G: nx.Graph, crime_types: Optional[List[str]] = None, 
-    mode: str = 'volume', department: Optional[str] = None) -> Dict:
+def floyd_warshall_routes(
+    G: nx.Graph,
+    crime_types: Optional[List[str]] = None,
+    mode: str = 'volume',
+    department: Optional[str] = None,
+    show_plot: bool = True,
+    verbose: bool = True,
+) -> Dict:
+
+    log = print if verbose else (lambda *args, **kwargs: None)
     
     G_filtered = _filter_subgraph(G, department)
     nodes = list(G_filtered.nodes())
     n = len(nodes)
     
     if n < 2:
-        print("Error: Se necesitan al menos 2 nodos para el análisis Floyd-Warshall.")
+        log("Error: Se necesitan al menos 2 nodos para el análisis Floyd-Warshall.")
         return {}
         
     node_to_index = {node: i for i, node in enumerate(nodes)}
@@ -504,6 +607,8 @@ def floyd_warshall_routes(G: nx.Graph, crime_types: Optional[List[str]] = None,
     }
     
     # 4. Visualización y Leyenda
+    image_path = None
+
     if most_critical_path:
         
         node_colors = []
@@ -545,65 +650,96 @@ def floyd_warshall_routes(G: nx.Graph, crime_types: Optional[List[str]] = None,
             }
         }
             
-        draw_analysis_graph(G_filtered, pos, 
-                            "RUTAS DE MAYOR CONCENTRACIÓN DE DENUNCIAS", 
-                            f"Análisis Floyd-Warshall (Modo: {mode.title()})", 
-                            node_colors, edge_colors, labels, stats, 
-                            f"floyd_warshall_{mode}.png", legend)
+        image_path = draw_analysis_graph(
+            G_filtered,
+            pos,
+            "RUTAS DE MAYOR CONCENTRACIÓN DE DENUNCIAS",
+            f"Análisis Floyd-Warshall (Modo: {mode.title()})",
+            node_colors,
+            edge_colors,
+            labels,
+            stats,
+            f"floyd_warshall_{mode}.png",
+            legend,
+            show_plot=show_plot,
+        )
         
         # 5. Reporte detallado (Impresión en consola - REESTRUCTURADO EN 4 PARTES)
         
-        print("\n==================== REPORTE DE ANÁLISIS FLOYD-WARSHALL ====================")
+        log("\n==================== REPORTE DE ANÁLISIS FLOYD-WARSHALL ====================")
         
         # PARTE 1: Rutas Críticas (Métricas Clave)
-        print("\n[ PARTE 1: RUTAS CRÍTICAS (MÉTRICAS CLAVE) 📊 ]")
-        print("-" * 60)
-        print(f"| {'Algoritmo Ejecutado':<29}: {stats['algoritmo']}")
-        print(f"| {'Modo de Análisis':<29}: {stats['modo_analisis']}")
-        print(f"| {'Caminos Calculados (Total)':<29}: {stats['num_caminos_calculados']}")
-        print(f"| {'Distritos Puente (Total)':<29}: {stats['num_distritos_puentes']}")
-        print(f"| {'Casos Máx. Concentración':<29}: {stats['mayor_concentracion_casos']}")
-        print("-" * 60)
+        log("\n[ PARTE 1: RUTAS CRÍTICAS (MÉTRICAS CLAVE) 📊 ]")
+        log("-" * 60)
+        log(f"| {'Algoritmo Ejecutado':<29}: {stats['algoritmo']}")
+        log(f"| {'Modo de Análisis':<29}: {stats['modo_analisis']}")
+        log(f"| {'Caminos Calculados (Total)':<29}: {stats['num_caminos_calculados']}")
+        log(f"| {'Distritos Puente (Total)':<29}: {stats['num_distritos_puentes']}")
+        log(f"| {'Casos Máx. Concentración':<29}: {stats['mayor_concentracion_casos']}")
+        log("-" * 60)
 
         # PARTE 2: Concentración de Denuncias
-        print("\n[ PARTE 2: CONCENTRACIÓN DE DENUNCIAS (RUTAS TOP) 🚨 ]")
-        
-        print(f"**Ruta de Máxima Concentración ({stats['mayor_concentracion_casos']} casos):**")
-        print(f"Nodos: {stats['ruta_mayor_concentracion']}")
+        log("\n[ PARTE 2: CONCENTRACIÓN DE DENUNCIAS (RUTAS TOP) 🚨 ]")
+
+        log(f"**Ruta de Máxima Concentración ({stats['mayor_concentracion_casos']} casos):**")
+        log(f"Nodos: {stats['ruta_mayor_concentracion']}")
 
         if most_efficient_path:
-            print(f"\n**Ruta Más Eficiente (Min. Casos - {stats['ruta_mas_eficiente_casos']} casos):**")
-            print(f"Nodos: {stats['ruta_mas_eficiente_distritos']}")
+            log(f"\n**Ruta Más Eficiente (Min. Casos - {stats['ruta_mas_eficiente_casos']} casos):**")
+            log(f"Nodos: {stats['ruta_mas_eficiente_distritos']}")
         
         # PARTE 3: Rutas Críticas Detalladas (Top 10)
-        print("\n[ PARTE 3: RUTAS CRÍTICAS DETALLADAS (TOP 10) 🗺️ ]")
+        log("\n[ PARTE 3: RUTAS CRÍTICAS DETALLADAS (TOP 10) 🗺️ ]")
         for i, ruta in enumerate(critical_paths[:10]):
-            print(f"Ruta {i+1}: {ruta['concentration']} casos. Distritos: {' -> '.join(ruta['path'])}")
+            log(f"Ruta {i+1}: {ruta['concentration']} casos. Distritos: {' -> '.join(ruta['path'])}")
 
         # PARTE 4: Distritos Puentes Estratégicos
-        print("\n[ PARTE 4: DISTRITOS PUENTES ESTRATÉGICOS 🌉 ]")
+        log("\n[ PARTE 4: DISTRITOS PUENTES ESTRATÉGICOS 🌉 ]")
         if bridge_nodes:
             # Mostrar también el número de veces que aparecen en las rutas
             bridge_report = pd.DataFrame(node_counts).reset_index()
             bridge_report.columns = ['Distrito', 'Frecuencia en Rutas']
             bridge_report = bridge_report[bridge_report['Distrito'].isin(bridge_nodes)]
             bridge_report.sort_values(by='Frecuencia en Rutas', ascending=False, inplace=True)
-            print("Estos distritos son cruciales para conectar la mayoría de las rutas críticas.")
-            print(bridge_report.to_string(index=False))
+            log("Estos distritos son cruciales para conectar la mayoría de las rutas críticas.")
+            log(bridge_report.to_string(index=False))
         else:
-            print("No se identificaron distritos puentes estratégicos (Flujo bajo en rutas críticas).")
+            log("No se identificaron distritos puentes estratégicos (Flujo bajo en rutas críticas).")
 
-        print("\n==================== FIN DEL ANÁLISIS FLOYD-WARSHALL ====================")
+        log("\n==================== FIN DEL ANÁLISIS FLOYD-WARSHALL ====================")
 
-    return stats
+    bridge_report_list = []
+    if 'bridge_report' in locals():
+        bridge_report_list = bridge_report.to_dict(orient='records')
+
+    result = {
+        "stats": stats,
+        "critical_paths": critical_paths,
+        "bridge_nodes": bridge_nodes,
+        "bridge_report": bridge_report_list,
+        "most_critical_path": most_critical_path,
+        "most_efficient_path": most_efficient_path,
+        "image_path": image_path,
+        "mode": mode,
+    }
+
+    return result
 
 
 # --------------------------------------------------------------------------
 # --- 4. Análisis Kruskal (MST) (REPORTE DE 4 PARTES IMPLEMENTADO) ---
 # --------------------------------------------------------------------------
 
-def kruskal_mst_analysis(G: nx.Graph, k: Optional[int] = None, crime_types: Optional[List[str]] = None, 
-    department: Optional[str] = None) -> Dict:
+def kruskal_mst_analysis(
+    G: nx.Graph,
+    k: Optional[int] = None,
+    crime_types: Optional[List[str]] = None,
+    department: Optional[str] = None,
+    show_plot: bool = True,
+    verbose: bool = True,
+) -> Dict:
+
+    log = print if verbose else (lambda *args, **kwargs: None)
     
     G_filtered = _filter_subgraph(G, department)
     
@@ -622,7 +758,7 @@ def kruskal_mst_analysis(G: nx.Graph, k: Optional[int] = None, crime_types: Opti
         priority_nodes_input = priority_nodes_all
         
     if len(priority_nodes_input) < 2:
-        print("Advertencia: Se necesitan al menos 2 nodos prioritarios.")
+        log("Advertencia: Se necesitan al menos 2 nodos prioritarios.")
         return {}
         
     # 2. Definir el peso de costo inverso para el MST
@@ -704,45 +840,55 @@ def kruskal_mst_analysis(G: nx.Graph, k: Optional[int] = None, crime_types: Opti
         }
     }
         
-    draw_analysis_graph(G_filtered, pos, 
-                        "RED MÍNIMA DE DISTRITOS CON MAYOR ACUMULACIÓN DELICTIVA", 
-                        f"Análisis Kruskal (MST). Reducción del {mst_stats['reduccion_peso_pct']:.2f}% en el costo.", 
-                        node_colors, edge_colors, labels, mst_stats,
-                        f"kruskal_mst_k_{k or 'auto'}.png", legend)
+    image_path = draw_analysis_graph(
+        G_filtered,
+        pos,
+        "RED MÍNIMA DE DISTRITOS CON MAYOR ACUMULACIÓN DELICTIVA",
+        f"Análisis Kruskal (MST). Reducción del {mst_stats['reduccion_peso_pct']:.2f}% en el costo.",
+        node_colors,
+        edge_colors,
+        labels,
+        mst_stats,
+        f"kruskal_mst_k_{k or 'auto'}.png",
+        legend,
+        show_plot=show_plot,
+    )
     
     # 6. Reporte detallado (Impresión en consola - REESTRUCTURADO EN 4 PARTES)
     
-    print("\n==================== REPORTE DE ANÁLISIS KRUSKAL (MST) ====================")
+    log("\n==================== REPORTE DE ANÁLISIS KRUSKAL (MST) ====================")
     
     # PARTE 1: Información de la Red Mínima
-    print("\n[ PARTE 1: INFORMACIÓN DE LA RED MÍNIMA ESENCIAL 🌐 ]")
-    print("-" * 60)
-    print(f"| {'Aristas en el MST':<29}: {mst_stats['MST_aristas']}")
-    print(f"| {'Aristas Eliminadas (Complejidad)':<29}: {mst_stats['aristas_eliminadas']}")
-    print(f"| {'Peso Total del MST (Costo)':<29}: {mst_stats['peso_total_MST']:.4f}")
-    print(f"| {'Reducción del Peso Total (%)':<29}: {mst_stats['reduccion_peso_pct']:.2f}%")
-    print("-" * 60)
+    log("\n[ PARTE 1: INFORMACIÓN DE LA RED MÍNIMA ESENCIAL 🌐 ]")
+    log("-" * 60)
+    log(f"| {'Aristas en el MST':<29}: {mst_stats['MST_aristas']}")
+    log(f"| {'Aristas Eliminadas (Complejidad)':<29}: {mst_stats['aristas_eliminadas']}")
+    log(f"| {'Peso Total del MST (Costo)':<29}: {mst_stats['peso_total_MST']:.4f}")
+    log(f"| {'Reducción del Peso Total (%)':<29}: {mst_stats['reduccion_peso_pct']:.2f}%")
+    log("-" * 60)
 
     # PARTE 2: Eficiencia de la Red
-    print("\n[ PARTE 2: EFICIENCIA Y COBERTURA DE LA RED 📉 ]")
-    print(f"**Cobertura Territorial:** {mst_stats['cobertura_territorial']}")
-    print(f"**Reducción de Complejidad:** Se eliminaron {mst_stats['aristas_eliminadas']} aristas no esenciales.")
-    print(f"**Focos del Crimen Detectados:** {mst_stats['focos_del_crimen_detectados']} distritos están en el 75% cuartil superior.")
+    log("\n[ PARTE 2: EFICIENCIA Y COBERTURA DE LA RED 📉 ]")
+    log(f"**Cobertura Territorial:** {mst_stats['cobertura_territorial']}")
+    log(f"**Reducción de Complejidad:** Se eliminaron {mst_stats['aristas_eliminadas']} aristas no esenciales.")
+    log(f"**Focos del Crimen Detectados:** {mst_stats['focos_del_crimen_detectados']} distritos están en el 75% cuartil superior.")
     
     # PARTE 3: Nodos Críticos (Focos Rojos)
-    print("\n[ PARTE 3: NODOS CRÍTICOS (FOCOS ROJOS) 🛑 ]")
+    log("\n[ PARTE 3: NODOS CRÍTICOS (FOCOS ROJOS) 🛑 ]")
+    critical_nodes_sorted = []
     if critical_nodes_data:
         df_criticos = pd.DataFrame(critical_nodes_data).sort_values(by='casos', ascending=False)
-        print(df_criticos.to_string(index=False))
-        print("-" * 60)
-        print(f"**Total Casos en Nodos Críticos:** {mst_stats['total_casos_nodos_criticos']}")
-        print(f"**% que Representa del Total:** {mst_stats['pct_delincuencia_criticos']:.2f}%")
+        log(df_criticos.to_string(index=False))
+        log("-" * 60)
+        log(f"**Total Casos en Nodos Críticos:** {mst_stats['total_casos_nodos_criticos']}")
+        log(f"**% que Representa del Total:** {mst_stats['pct_delincuencia_criticos']:.2f}%")
+        critical_nodes_sorted = df_criticos.to_dict(orient='records')
     else:
-        print("No se identificaron nodos críticos con el umbral del 75% cuartil.")
+        log("No se identificaron nodos críticos con el umbral del 75% cuartil.")
 
     # PARTE 4: Columna Central de la Conexión Delictiva (Top 5)
-    print("\n[ PARTE 4: COLUMNA CENTRAL DE LA CONEXIÓN DELICTIVA (TOP 5 ENLACES ESENCIALES) 🔗 ]")
-    print("Muestra los enlaces de menor costo (mayor importancia) para la red mínima.")
+    log("\n[ PARTE 4: COLUMNA CENTRAL DE LA CONEXIÓN DELICTIVA (TOP 5 ENLACES ESENCIALES) 🔗 ]")
+    log("Muestra los enlaces de menor costo (mayor importancia) para la red mínima.")
     
     reporte_columna = []
     for u, v, cost in central_column_rank:
@@ -751,10 +897,20 @@ def kruskal_mst_analysis(G: nx.Graph, k: Optional[int] = None, crime_types: Opti
             'Casos Acumulados': f"{_get_case_count(G_filtered, u, crime_types) + _get_case_count(G_filtered, v, crime_types)}",
             'Costo (MST)': f"{cost:.4f}",
         })
-    print(pd.DataFrame(reporte_columna).to_string(index=False))
-    print("\n==================== FIN DEL ANÁLISIS KRUSKAL (MST) ====================")
+    central_column_report = pd.DataFrame(reporte_columna)
+    log(central_column_report.to_string(index=False))
+    log("\n==================== FIN DEL ANÁLISIS KRUSKAL (MST) ====================")
 
-    return mst_stats
+    result = {
+        "stats": mst_stats,
+        "critical_nodes": critical_nodes_sorted,
+        "central_column": central_column_report.to_dict(orient='records'),
+        "image_path": image_path,
+        "edges_removed": edges_removed,
+        "edges_mst": edges_in_mst,
+    }
+
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -770,11 +926,13 @@ def mostrar_algoritmos(df: pd.DataFrame, gdf: gpd.GeoDataFrame):
     department = input("> Ingrese el Departamento a analizar (Ej: TACNA, LIMA): ")
     crime_input = input("\n> Tipo de delito (Ej: EXTORSION, HOMICIDIO, o TODO): ")
     
-    crime_types = [crime_input.upper().strip()] if crime_input.upper().strip() != "TODO" else ["TODO"]
+    G_base: nx.Graph
+    crime_types: List[str]
     
-    # 2. Construir el grafo base
     try:
-        G_base = _create_graph_from_data(df, gdf, department, crime_types)
+        G_base, crime_types = preparar_grafo_para_algoritmos(
+            df, gdf, department, crime_input, verbose=True
+        )
         if not G_base.nodes:
             print("No se pudo construir el grafo. Verifique el departamento o los datos.")
             return
@@ -803,7 +961,16 @@ def mostrar_algoritmos(df: pd.DataFrame, gdf: gpd.GeoDataFrame):
             max_depth = int(max_depth_input) if max_depth_input.isdigit() else None
             
             try:
-                expansion_tree(G_base, inicio.strip(), method, max_depth, crime_types, department)
+                expansion_tree(
+                    G_base,
+                    inicio.strip(),
+                    method,
+                    max_depth,
+                    crime_types,
+                    department,
+                    show_plot=True,
+                    verbose=True,
+                )
             except Exception as e:
                 print(f"Error en expansion_tree: {e}")
                 
@@ -814,7 +981,14 @@ def mostrar_algoritmos(df: pd.DataFrame, gdf: gpd.GeoDataFrame):
             
             mode = input("\n> Modo de análisis ('volume' para máx. concentración / 'efficiency' para camino simple): ").lower()
             try:
-                floyd_warshall_routes(G_base, crime_types, mode, department)
+                floyd_warshall_routes(
+                    G_base,
+                    crime_types,
+                    mode,
+                    department,
+                    show_plot=True,
+                    verbose=True,
+                )
             except Exception as e:
                 print(f"Error en floyd_warshall_routes: {e}")
 
@@ -826,7 +1000,14 @@ def mostrar_algoritmos(df: pd.DataFrame, gdf: gpd.GeoDataFrame):
             k_input = input("\n> Top K nodos prioritarios (opcional, ENTER para usar umbral 75% superior): ")
             k = int(k_input) if k_input.isdigit() else None
             try:
-                kruskal_mst_analysis(G_base, k, crime_types, department)
+                kruskal_mst_analysis(
+                    G_base,
+                    k,
+                    crime_types,
+                    department,
+                    show_plot=True,
+                    verbose=True,
+                )
             except Exception as e:
                 print(f"Error en kruskal_mst_analysis: {e}")
 
